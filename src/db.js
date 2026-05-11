@@ -3,12 +3,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
+import { calculateOverallScore, scoreFieldNames, validateEvaluationInput } from "../public/scoring.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const dataDir = path.join(rootDir, "data");
 const databasePath = path.join(dataDir, "app.sqlite");
 
 let db;
+
+const evaluationColumns = [
+  "id",
+  "item_id",
+  ...scoreFieldNames,
+  "overall_score",
+  "status",
+  "tags",
+  "comment",
+  "created_at",
+  "updated_at",
+];
 
 export function initializeDatabase() {
   if (db) return db;
@@ -50,15 +64,32 @@ export function initializeDatabase() {
       UNIQUE(batch_id, import_key)
     );
 
+  `);
+  ensureEvaluationSchema();
+
+  return db;
+}
+
+function ensureEvaluationSchema() {
+  const existing = db.prepare("PRAGMA table_info(evaluations)").all();
+  if (existing.length > 0) {
+    const existingColumns = existing.map((column) => column.name);
+    const matches = evaluationColumns.every((column) => existingColumns.includes(column));
+    if (!matches) {
+      db.exec("DROP TABLE evaluations");
+    }
+  }
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS evaluations (
       id TEXT PRIMARY KEY,
       item_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE,
-      intent_score INTEGER NOT NULL,
-      source_fidelity_score INTEGER NOT NULL,
-      prompt_optimization_score INTEGER NOT NULL,
-      visual_quality_score INTEGER NOT NULL,
-      technical_quality_score INTEGER NOT NULL,
-      safety_score INTEGER NOT NULL,
+      product_preservation_score INTEGER NOT NULL,
+      instruction_adherence_score INTEGER NOT NULL,
+      integration_grounding_score INTEGER NOT NULL,
+      prompt_optimization_value_score INTEGER NOT NULL,
+      commercial_quality_score INTEGER NOT NULL,
+      technical_safety_score INTEGER NOT NULL,
       overall_score REAL NOT NULL,
       status TEXT NOT NULL,
       tags TEXT NOT NULL,
@@ -67,8 +98,6 @@ export function initializeDatabase() {
       updated_at TEXT NOT NULL
     );
   `);
-
-  return db;
 }
 
 export function getDatabase() {
@@ -205,12 +234,12 @@ export function getItemsForBatch(batchId) {
     .prepare(
       `SELECT
         i.*,
-        e.intent_score,
-        e.source_fidelity_score,
-        e.prompt_optimization_score,
-        e.visual_quality_score,
-        e.technical_quality_score,
-        e.safety_score,
+        e.product_preservation_score,
+        e.instruction_adherence_score,
+        e.integration_grounding_score,
+        e.prompt_optimization_value_score,
+        e.commercial_quality_score,
+        e.technical_safety_score,
         e.overall_score,
         e.status,
         e.tags,
@@ -230,26 +259,12 @@ export function getItemsForBatch(batchId) {
     }));
 }
 
-function clampScore(value, fallback = 3) {
-  const score = Number(value ?? fallback);
-  if (!Number.isFinite(score)) return fallback;
-  return Math.max(1, Math.min(5, Math.round(score)));
-}
-
-export function calculateOverallScore(evaluation) {
-  return Number(
-    (
-      evaluation.intent_score * 0.25 +
-      evaluation.source_fidelity_score * 0.2 +
-      evaluation.prompt_optimization_score * 0.2 +
-      evaluation.visual_quality_score * 0.15 +
-      evaluation.technical_quality_score * 0.1 +
-      evaluation.safety_score * 0.1
-    ).toFixed(2)
-  );
+export function itemExists(itemId) {
+  return Boolean(getDatabase().prepare("SELECT 1 FROM items WHERE id = ?").get(itemId));
 }
 
 export function saveEvaluation(itemId, input) {
+  const validInput = validateEvaluationInput(input);
   const existing = getDatabase()
     .prepare("SELECT id, created_at FROM evaluations WHERE item_id = ?")
     .get(itemId);
@@ -257,15 +272,15 @@ export function saveEvaluation(itemId, input) {
   const evaluation = {
     id: existing?.id || crypto.randomUUID(),
     item_id: itemId,
-    intent_score: clampScore(input.intent_score),
-    source_fidelity_score: clampScore(input.source_fidelity_score),
-    prompt_optimization_score: clampScore(input.prompt_optimization_score),
-    visual_quality_score: clampScore(input.visual_quality_score),
-    technical_quality_score: clampScore(input.technical_quality_score),
-    safety_score: clampScore(input.safety_score),
-    status: String(input.status || "reviewed"),
-    tags: JSON.stringify(Array.isArray(input.tags) ? input.tags : []),
-    comment: String(input.comment || ""),
+    product_preservation_score: validInput.product_preservation_score,
+    instruction_adherence_score: validInput.instruction_adherence_score,
+    integration_grounding_score: validInput.integration_grounding_score,
+    prompt_optimization_value_score: validInput.prompt_optimization_value_score,
+    commercial_quality_score: validInput.commercial_quality_score,
+    technical_safety_score: validInput.technical_safety_score,
+    status: validInput.status,
+    tags: JSON.stringify(validInput.tags),
+    comment: validInput.comment,
     created_at: existing?.created_at || timestamp,
     updated_at: timestamp,
   };
@@ -276,12 +291,12 @@ export function saveEvaluation(itemId, input) {
       `INSERT INTO evaluations (
         id,
         item_id,
-        intent_score,
-        source_fidelity_score,
-        prompt_optimization_score,
-        visual_quality_score,
-        technical_quality_score,
-        safety_score,
+        product_preservation_score,
+        instruction_adherence_score,
+        integration_grounding_score,
+        prompt_optimization_value_score,
+        commercial_quality_score,
+        technical_safety_score,
         overall_score,
         status,
         tags,
@@ -290,12 +305,12 @@ export function saveEvaluation(itemId, input) {
         updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(item_id) DO UPDATE SET
-        intent_score = excluded.intent_score,
-        source_fidelity_score = excluded.source_fidelity_score,
-        prompt_optimization_score = excluded.prompt_optimization_score,
-        visual_quality_score = excluded.visual_quality_score,
-        technical_quality_score = excluded.technical_quality_score,
-        safety_score = excluded.safety_score,
+        product_preservation_score = excluded.product_preservation_score,
+        instruction_adherence_score = excluded.instruction_adherence_score,
+        integration_grounding_score = excluded.integration_grounding_score,
+        prompt_optimization_value_score = excluded.prompt_optimization_value_score,
+        commercial_quality_score = excluded.commercial_quality_score,
+        technical_safety_score = excluded.technical_safety_score,
         overall_score = excluded.overall_score,
         status = excluded.status,
         tags = excluded.tags,
@@ -305,12 +320,12 @@ export function saveEvaluation(itemId, input) {
     .run(
       evaluation.id,
       evaluation.item_id,
-      evaluation.intent_score,
-      evaluation.source_fidelity_score,
-      evaluation.prompt_optimization_score,
-      evaluation.visual_quality_score,
-      evaluation.technical_quality_score,
-      evaluation.safety_score,
+      evaluation.product_preservation_score,
+      evaluation.instruction_adherence_score,
+      evaluation.integration_grounding_score,
+      evaluation.prompt_optimization_value_score,
+      evaluation.commercial_quality_score,
+      evaluation.technical_safety_score,
       evaluation.overall_score,
       evaluation.status,
       evaluation.tags,
@@ -346,12 +361,12 @@ export function getBatchStats(batchId) {
         COUNT(i.id) AS total_items,
         SUM(CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_items,
         ROUND(AVG(e.overall_score), 2) AS avg_overall_score,
-        ROUND(AVG(e.intent_score), 2) AS avg_intent_score,
-        ROUND(AVG(e.source_fidelity_score), 2) AS avg_source_fidelity_score,
-        ROUND(AVG(e.prompt_optimization_score), 2) AS avg_prompt_optimization_score,
-        ROUND(AVG(e.visual_quality_score), 2) AS avg_visual_quality_score,
-        ROUND(AVG(e.technical_quality_score), 2) AS avg_technical_quality_score,
-        ROUND(AVG(e.safety_score), 2) AS avg_safety_score
+        ROUND(AVG(e.product_preservation_score), 2) AS avg_product_preservation_score,
+        ROUND(AVG(e.instruction_adherence_score), 2) AS avg_instruction_adherence_score,
+        ROUND(AVG(e.integration_grounding_score), 2) AS avg_integration_grounding_score,
+        ROUND(AVG(e.prompt_optimization_value_score), 2) AS avg_prompt_optimization_value_score,
+        ROUND(AVG(e.commercial_quality_score), 2) AS avg_commercial_quality_score,
+        ROUND(AVG(e.technical_safety_score), 2) AS avg_technical_safety_score
        FROM items i
        LEFT JOIN evaluations e ON e.item_id = i.id
        WHERE i.batch_id = ?

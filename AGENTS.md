@@ -46,26 +46,30 @@ Keep the first version local-first. Avoid login, cloud storage, multi-user permi
 
 Use a 1-5 score for each dimension:
 
-- Original intent alignment, weight 25%.
-- Source image fidelity, weight 20%.
-- Prompt optimization effectiveness, weight 20%.
-- Visual quality, weight 15%.
-- Technical quality, weight 10%.
-- Safety and compliance, weight 10%.
+- Product preservation, weight 25%.
+- Instruction adherence, weight 20%.
+- Scene integration, weight 15%.
+- Prompt optimization value, weight 15%.
+- Commercial quality, weight 15%.
+- Technical and safety, weight 10%.
 
-Compute the weighted overall score from these dimensions, but also keep reviewer tags and comments for later analysis.
+This is an image-to-image product review workflow. Treat product preservation as the primary hard constraint: the generated scene can be attractive only if the original product is not moved, redrawn, resized, recolored, distorted, occluded, or otherwise changed. Compute the weighted overall score from these dimensions, then apply hard gates: product preservation 1-2 caps overall at 2.5; instruction adherence 1-2 caps overall at 3.0; technical and safety 1 caps overall at 2.0. Keep reviewer tags and comments for later analysis.
 
 Recommended issue tags:
 
-- `off_prompt`
-- `source_mismatch`
-- `over_optimized`
-- `under_specified`
+- `product_changed`
+- `product_moved`
+- `silhouette_damage`
+- `foreground_overlap`
+- `missing_contact_shadow`
+- `lighting_mismatch`
+- `perspective_mismatch`
+- `prompt_drift`
+- `over_constrained_prompt`
+- `under_specified_prompt`
+- `low_commercial_value`
 - `artifact`
-- `bad_text`
-- `bad_anatomy`
-- `style_mismatch`
-- `unsafe`
+- `unsafe_or_brand_risk`
 - `excellent`
 
 ## Engineering Rules
@@ -76,7 +80,7 @@ Before making code changes, inspect the current files and preserve unrelated use
 
 When validation commands exist, run the smallest relevant checks first, then broader build or test commands if runtime code changed. Report any commands that could not be run.
 
-Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
+Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations -- --yes` for explicitly deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
 
 ## Command Notes
 

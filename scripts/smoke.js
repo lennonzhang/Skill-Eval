@@ -16,6 +16,16 @@ async function getText(path) {
   return response.text();
 }
 
+async function postJson(path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
 const html = await getText("/");
 if (!html.includes("Skill Eval Review")) {
   throw new Error("Review page did not return expected HTML");
@@ -35,6 +45,40 @@ if (!Array.isArray(items) || items.length === 0) {
 const { stats } = await getJson(`/api/batches/${batch.id}/stats`);
 if (!stats?.summary || stats.summary.total_items !== items.length) {
   throw new Error("Stats summary does not match item count");
+}
+
+const invalidEvaluation = await postJson(`/api/items/${items[0].id}/evaluation`, {
+  product_preservation_score: 5,
+  instruction_adherence_score: 4,
+  integration_grounding_score: 3,
+  prompt_optimization_value_score: 2,
+  commercial_quality_score: 1,
+  status: "reviewed",
+  tags: ["excellent"],
+  comment: "missing technical_safety_score",
+});
+if (invalidEvaluation.response.status !== 400) {
+  throw new Error(`Invalid evaluation returned HTTP ${invalidEvaluation.response.status}, expected 400`);
+}
+
+const missingItem = await postJson("/api/items/not-a-real-item/evaluation", {
+  product_preservation_score: 5,
+  instruction_adherence_score: 4,
+  integration_grounding_score: 3,
+  prompt_optimization_value_score: 2,
+  commercial_quality_score: 1,
+  technical_safety_score: 5,
+  status: "reviewed",
+  tags: ["excellent"],
+  comment: "missing item smoke",
+});
+if (missingItem.response.status !== 404) {
+  throw new Error(`Missing item returned HTTP ${missingItem.response.status}, expected 404`);
+}
+
+const traversalResponse = await fetch(`${baseUrl}/data/..%2Fserver.js`);
+if (![403, 404].includes(traversalResponse.status)) {
+  throw new Error(`Traversal probe returned HTTP ${traversalResponse.status}, expected 403 or 404`);
 }
 
 const firstCachedImage = items

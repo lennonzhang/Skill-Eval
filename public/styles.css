@@ -418,7 +418,7 @@ button.secondary:hover {
 
 .score-row {
   display: grid;
-  grid-template-columns: 1fr 190px 42px;
+  grid-template-columns: minmax(210px, 1fr) 160px 42px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px 0;

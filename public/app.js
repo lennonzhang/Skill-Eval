@@ -1,24 +1,4 @@
-const scoreFields = [
-  ["intent_score", "Original intent", "25%"],
-  ["source_fidelity_score", "Source fidelity", "20%"],
-  ["prompt_optimization_score", "Prompt optimization", "20%"],
-  ["visual_quality_score", "Visual quality", "15%"],
-  ["technical_quality_score", "Technical quality", "10%"],
-  ["safety_score", "Safety", "10%"],
-];
-
-const tagOptions = [
-  "off_prompt",
-  "source_mismatch",
-  "over_optimized",
-  "under_specified",
-  "artifact",
-  "bad_text",
-  "bad_anatomy",
-  "style_mismatch",
-  "unsafe",
-  "excellent",
-];
+import { calculateOverallScore, scoreFields, statusOptions, tagOptions } from "./scoring.js";
 
 const state = {
   batches: [],
@@ -73,14 +53,7 @@ function scoreValue(item, field) {
 }
 
 function calculateOverall(form) {
-  const value =
-    Number(form.intent_score) * 0.25 +
-    Number(form.source_fidelity_score) * 0.2 +
-    Number(form.prompt_optimization_score) * 0.2 +
-    Number(form.visual_quality_score) * 0.15 +
-    Number(form.technical_quality_score) * 0.1 +
-    Number(form.safety_score) * 0.1;
-  return value.toFixed(2);
+  return calculateOverallScore(Object.fromEntries(scoreFields.map(({ field }) => [field, Number(form[field])]))).toFixed(2);
 }
 
 function isReviewed(item) {
@@ -145,6 +118,9 @@ function renderMetrics() {
 
 function renderFilters() {
   const models = [...new Set(state.items.map((item) => item.model))].sort();
+  if (state.filters.model !== "all" && !models.includes(state.filters.model)) {
+    state.filters.model = "all";
+  }
   els.modelFilter.innerHTML = [
     '<option value="all">All models</option>',
     ...models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`),
@@ -221,7 +197,7 @@ function renderReviewPane() {
     return;
   }
 
-  const form = Object.fromEntries(scoreFields.map(([field]) => [field, scoreValue(item, field)]));
+  const form = Object.fromEntries(scoreFields.map(({ field }) => [field, scoreValue(item, field)]));
   const overall = item.overall_score ? Number(item.overall_score).toFixed(2) : calculateOverall(form);
   const selectedTags = Array.isArray(item.tags) ? item.tags : [];
 
@@ -265,14 +241,14 @@ function renderReviewPane() {
           <h3>Core Scores</h3>
           ${scoreFields
             .slice(0, 3)
-            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .map((field) => scoreRow(field, form[field.field]))
             .join("")}
         </div>
         <div class="score-box">
           <h3>Quality Scores</h3>
           ${scoreFields
             .slice(3)
-            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .map((field) => scoreRow(field, form[field.field]))
             .join("")}
         </div>
       </div>
@@ -282,7 +258,7 @@ function renderReviewPane() {
           <h3>Status</h3>
           <div class="tag-grid">
             <select id="statusSelect" name="status">
-              ${["reviewed", "needs_recheck", "failed"]
+              ${statusOptions
                 .map(
                   (status) =>
                     `<option value="${status}" ${item.status === status ? "selected" : ""}>${status}</option>`
@@ -352,15 +328,15 @@ function renderReviewPane() {
   });
 }
 
-function scoreRow(field, label, weight, value) {
+function scoreRow(scoreField, value) {
   return `
     <div class="score-row">
-      <label for="${field}">
-        ${label}
-        <small>Weight ${weight}</small>
+      <label for="${scoreField.field}">
+        ${scoreField.label}
+        <small>Weight ${scoreField.weightLabel}. ${scoreField.help}</small>
       </label>
-      <input id="${field}" name="${field}" type="range" min="1" max="5" step="1" value="${value}" />
-      <span class="score-value" data-score-value="${field}">${value}</span>
+      <input id="${scoreField.field}" name="${scoreField.field}" type="range" min="1" max="5" step="1" value="${value}" />
+      <span class="score-value" data-score-value="${scoreField.field}">${value}</span>
     </div>
   `;
 }
@@ -382,6 +358,14 @@ function renderStats() {
             </header>
             <div class="bar"><span style="width:${percent}%"></span></div>
             <small>${row.reviewed_items || 0}/${row.total_items || 0} reviewed</small>
+            <small>
+              ${scoreFields
+                .map(({ shortLabel, field }) => {
+                  const statKey = `avg_${field}`;
+                  return `${shortLabel} ${row[statKey] ?? "--"}`;
+                })
+                .join(" · ")}
+            </small>
           </div>
         `;
       })
@@ -406,7 +390,7 @@ function renderStats() {
 }
 
 function readScoreForm(formEl) {
-  return Object.fromEntries(scoreFields.map(([field]) => [field, formEl.elements[field].value]));
+  return Object.fromEntries(scoreFields.map(({ field }) => [field, formEl.elements[field].value]));
 }
 
 async function saveEvaluation(itemId, formEl, tags) {
@@ -435,7 +419,7 @@ async function loadBatches() {
   renderBatchSelect();
 }
 
-async function loadBatch(batchId, keepSelectedItemId = "") {
+async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   if (!batchId) {
     state.items = [];
     state.stats = null;
@@ -443,6 +427,15 @@ async function loadBatch(batchId, keepSelectedItemId = "") {
     return;
   }
   state.selectedBatchId = batchId;
+  if (options.resetFilters) {
+    state.filters = {
+      model: "all",
+      status: "all",
+      search: "",
+    };
+    els.searchInput.value = "";
+    els.statusFilter.value = "all";
+  }
   const [itemsBody, statsBody] = await Promise.all([
     api(`/api/batches/${batchId}/items`),
     api(`/api/batches/${batchId}/stats`),
@@ -512,7 +505,7 @@ function escapeHtml(value) {
 }
 
 els.batchSelect.addEventListener("change", () => {
-  loadBatch(els.batchSelect.value).catch(showFatalError);
+  loadBatch(els.batchSelect.value, "", { resetFilters: true }).catch(showFatalError);
 });
 
 els.importButton.addEventListener("click", () => {
