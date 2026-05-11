@@ -46,26 +46,30 @@ Keep the first version local-first. Avoid login, cloud storage, multi-user permi
 
 Use a 1-5 score for each dimension:
 
-- Original intent alignment, weight 25%.
-- Source image fidelity, weight 20%.
-- Prompt optimization effectiveness, weight 20%.
-- Visual quality, weight 15%.
-- Technical quality, weight 10%.
-- Safety and compliance, weight 10%.
+- Product preservation, weight 25%.
+- Instruction adherence, weight 20%.
+- Scene integration, weight 15%.
+- Prompt optimization value, weight 15%.
+- Commercial quality, weight 15%.
+- Technical and safety, weight 10%.
 
-Compute the weighted overall score from these dimensions, but also keep reviewer tags and comments for later analysis.
+This is an image-to-image product review workflow. Treat product preservation as the primary hard constraint: the generated scene can be attractive only if the original product is not moved, redrawn, resized, recolored, distorted, occluded, or otherwise changed. Compute the weighted overall score from these dimensions, then apply hard gates: product preservation 1-2 caps overall at 2.5; instruction adherence 1-2 caps overall at 3.0; technical and safety 1 caps overall at 2.0. Keep reviewer tags and comments for later analysis.
 
 Recommended issue tags:
 
-- `off_prompt`
-- `source_mismatch`
-- `over_optimized`
-- `under_specified`
+- `product_changed`
+- `product_moved`
+- `silhouette_damage`
+- `foreground_overlap`
+- `missing_contact_shadow`
+- `lighting_mismatch`
+- `perspective_mismatch`
+- `prompt_drift`
+- `over_constrained_prompt`
+- `under_specified_prompt`
+- `low_commercial_value`
 - `artifact`
-- `bad_text`
-- `bad_anatomy`
-- `style_mismatch`
-- `unsafe`
+- `unsafe_or_brand_risk`
 - `excellent`
 
 ## Engineering Rules
@@ -76,7 +80,7 @@ Before making code changes, inspect the current files and preserve unrelated use
 
 When validation commands exist, run the smallest relevant checks first, then broader build or test commands if runtime code changed. Report any commands that could not be run.
 
-Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
+Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations` for deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
 
 ## Command Notes
 
@@ -88,7 +92,11 @@ In this Windows sandbox, plain shell tool calls may fail with `windows sandbox: 
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command "..."
 ```
 
-Avoid ad hoc PowerShell API checks when a project script exists. Use `pnpm run smoke` instead of hand-building `Invoke-RestMethod` calls for batch items or stats. PowerShell can mis-handle JSON properties named `items` and can also corrupt `$()` or `$variable` expressions when commands are nested in double quotes.
+Avoid ad hoc PowerShell API checks when a project script exists. Use `pnpm run smoke` instead of hand-building `Invoke-RestMethod` calls for batch items or stats. Treat nested PowerShell quoting as fragile: `$variables`, `$()` expressions, format strings, and arguments with spaces can be expanded or split before PowerShell receives them.
+
+Keep `powershell.exe -Command` calls simple and single-purpose. Prefer project scripts, `rg -n`, `Select-String`, `Get-Content`, and other direct commands over multi-step inline scripts. If an inline command needs PowerShell variables, wrap or escape it so variables are not expanded by an outer shell before execution; if a parser error shows missing variables, empty `if` conditions, or broken pipes, rerun with safer quoting instead of debugging the project code.
+
+When passing lists of patterns or arguments that include spaces, quote each value explicitly or run separate simpler searches. Avoid relying on PowerShell format strings inside nested command strings; use simpler output or a project script when line-numbered or structured diagnostics are needed.
 
 For inline Node diagnostics on Windows, prefer a PowerShell here-string piped to Node:
 
@@ -99,7 +107,7 @@ console.log(getBatches()[0]);
 '@ | node --input-type=module
 ```
 
-Avoid complex `node -e` snippets with nested quotes, template strings, `$()`, or backticks inside `powershell.exe -Command`; previous attempts were truncated or reinterpreted by PowerShell.
+Avoid complex `node -e` snippets with nested quotes, template strings, `$()`, or backticks inside `powershell.exe -Command`; they are easy for PowerShell to truncate or reinterpret.
 
 Do not run `pnpm run dev` in the foreground with a short command timeout and treat the timeout as a failure. The dev server is a long-running process. For a background server on Windows, use `pnpm.cmd`, not the `pnpm` shim:
 
@@ -107,7 +115,7 @@ Do not run `pnpm run dev` in the foreground with a short command timeout and tre
 Start-Process -FilePath pnpm.cmd -ArgumentList 'run','dev' -WorkingDirectory 'D:\workcode\skill-eval' -RedirectStandardOutput 'D:\workcode\skill-eval\data\server.log' -RedirectStandardError 'D:\workcode\skill-eval\data\server.err.log' -WindowStyle Hidden
 ```
 
-If a local review server is already listening, stop only that owning process. First determine the active port from the current task context, the `PORT` environment variable, or the server config. Use a `$port` variable instead of hard-coding a specific value. Use single quotes around the outer PowerShell command so variables are not expanded before PowerShell runs:
+If a local review server is already listening, stop only that owning process. First determine the active port from the current task context, the `PORT` environment variable, or the server config. Use a `$port` variable instead of hard-coding a specific value, and make sure the command quoting preserves PowerShell variables until PowerShell runs:
 
 ```powershell
 $owners = (Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; foreach ($owner in $owners) { Stop-Process -Id $owner -Force }
@@ -115,9 +123,9 @@ $owners = (Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue).
 
 When inspecting or stopping port owners, do not use `$pid` as a variable name in PowerShell; `$PID` is a built-in read-only variable and PowerShell variable names are case-insensitive. Use `$owner` or `$processId` instead.
 
-Avoid `Get-CimInstance Win32_Process -Filter "ProcessId = $owner"` inside nested `powershell.exe -Command` strings. The quoting is easy to break and can produce `A positional parameter cannot be found that accepts argument '='`. For this project, `Get-Process -Id $owner | Select-Object Id,ProcessName,StartTime,Path` is enough to identify the dev server.
+Prefer `Get-Process -Id $owner | Select-Object Id,ProcessName,StartTime,Path` for identifying a dev-server process. Avoid deeper process-query expressions inside nested command strings unless they are clearly needed.
 
-Use this known-good check for the local review server after setting `$port` to the active dev-server port:
+For checking the local review server, keep the flow to: find listeners on the active port, list owners, inspect those owners with `Get-Process`, then stop only the matching server if needed.
 
 ```powershell
 $conns = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue; if ($conns) { $conns | Select-Object LocalAddress,LocalPort,State,OwningProcess; $owners = $conns.OwningProcess | Sort-Object -Unique; foreach ($owner in $owners) { Get-Process -Id $owner -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,Path } } else { "No process is listening on the configured port." }
@@ -130,6 +138,8 @@ $owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Silen
 ```
 
 PowerShell may print a simple string as one word per line through the shell tool. Treat the no-listener message split across lines as a successful no-listener result.
+
+When the outer `powershell.exe -Command` string is single-quoted, avoid returning double-quoted status strings from inside the script. In this shell-tool path the quotes may be stripped and a message such as `No listening process...` can be interpreted as a command. Prefer returning structured objects, or simply let an empty `Get-NetTCPConnection ... -ErrorAction SilentlyContinue` result mean no listener.
 
 Node prints an `ExperimentalWarning` for `node:sqlite` on Node 22. That warning is expected and is not a validation failure.
 
