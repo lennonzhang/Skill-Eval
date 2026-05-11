@@ -82,6 +82,26 @@ When validation commands exist, run the smallest relevant checks first, then bro
 
 Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations` for deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
 
+## Worktree Rules
+
+Before creating a Git worktree, run `git worktree list` and inspect the target parent directory. Do not assume `.worktrees/` is available just because it exists; it may be owned by another agent or workflow. If `.worktrees/` is already in use, confirm the naming convention or choose a clearly named sibling directory and state why.
+
+Preferred project-local layout, when available:
+
+```text
+D:\workcode\skill-eval\.worktrees\<task-slug>
+```
+
+Acceptable fallback layout:
+
+```text
+D:\workcode\<repo-name>-<task-slug>
+```
+
+Use scope-accurate branch names, for example `feature/overlay-compare`. Do not modify, delete, or repurpose another agent's worktree. If validation needs local ignored data such as `data/` or `resource/`, copy it only into ignored paths and verify with `git status --short --ignored` before committing.
+
+When committing from a worktree, commit only the worktree's intended source/doc changes. Leave unrelated dirty files in the main worktree untouched.
+
 ## Command Notes
 
 Prefer `pnpm run ...` scripts for project operations. This project intentionally has no required third-party runtime dependencies in the first version; `pnpm run` works without `node_modules`.
