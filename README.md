@@ -39,6 +39,7 @@ Use pnpm scripts:
 pnpm run import:resource
 pnpm run dev
 pnpm run check
+pnpm run clear:evaluations
 pnpm run selftest
 pnpm run smoke
 ```
@@ -48,6 +49,7 @@ Command details:
 - `pnpm run import:resource`: import `resource/*.json` and cache images.
 - `pnpm run dev`: start the local review server.
 - `pnpm run check`: syntax-check server, scripts, database/importer code, and frontend JS.
+- `pnpm run clear:evaluations`: delete all local evaluation records.
 - `pnpm run selftest`: validate scoring persistence and statistics inside a rollback transaction.
 - `pnpm run smoke`: run read-only checks against a running local server.
 
@@ -70,38 +72,64 @@ pnpm run dev
 
 ## Review Rubric
 
+This project evaluates product image-to-image generation, where the input product should stay fixed and the model should generate or improve the surrounding scene. The rubric therefore prioritizes source-image preservation and instruction-following over generic aesthetics.
+
+The rubric is informed by common evaluation practice in image generation and image editing research:
+
+- Text-image faithfulness should be judged as fine-grained prompt adherence, not only general image appeal.
+- Image editing must evaluate whether the edit follows the instruction while preserving the parts of the source image that should remain unchanged.
+- Human preference and commercial usefulness matter, but they should not override hard failures such as changing the product.
+- For product background generation, integration details such as contact shadows, lighting, occlusion, and perspective are part of edit quality.
+
+Useful references:
+
+- TIFA: https://huggingface.co/papers/2303.11897
+- ImageReward: https://huggingface.co/papers/2304.05977
+- InstructPix2Pix: https://huggingface.co/papers/2211.09800
+- MagicBrush: https://huggingface.co/papers/2306.10012
+
 Scores use a 1-5 scale. The overall score is weighted:
 
 ```text
 overall_score =
-  intent_score * 0.25 +
-  source_fidelity_score * 0.20 +
-  prompt_optimization_score * 0.20 +
-  visual_quality_score * 0.15 +
-  technical_quality_score * 0.10 +
-  safety_score * 0.10
+  product_preservation_score * 0.25 +
+  instruction_adherence_score * 0.20 +
+  integration_grounding_score * 0.15 +
+  prompt_optimization_value_score * 0.15 +
+  commercial_quality_score * 0.15 +
+  technical_safety_score * 0.10
 ```
 
 Dimensions:
 
-- Original intent alignment, 25%.
-- Source image fidelity, 20%.
-- Prompt optimization effectiveness, 20%.
-- Visual quality, 15%.
-- Technical quality, 10%.
-- Safety and compliance, 10%.
+- Product preservation, 25%: product pixels, silhouette, pose, size, position, identity, and material stay unchanged.
+- Instruction adherence, 20%: result follows the original prompt and optimized prompt without adding forbidden elements.
+- Scene integration, 15%: background, contact shadows, occlusion, lighting, and perspective ground the fixed product naturally.
+- Prompt optimization value, 15%: optimized prompt improves controllability and clarity without over-constraining or drifting from intent.
+- Commercial quality, 15%: image is clean, premium, attractive, and usable for ecommerce or marketing review.
+- Technical and safety, 10%: no severe artifacts, broken geometry, unsafe content, brand-risk elements, or unreadable generated text.
+
+Hard gates:
+
+- If product preservation is 1-2, overall score is capped at 2.5.
+- If instruction adherence is 1-2, overall score is capped at 3.0.
+- If technical and safety is 1, overall score is capped at 2.0.
 
 Built-in issue tags:
 
-- `off_prompt`
-- `source_mismatch`
-- `over_optimized`
-- `under_specified`
+- `product_changed`
+- `product_moved`
+- `silhouette_damage`
+- `foreground_overlap`
+- `missing_contact_shadow`
+- `lighting_mismatch`
+- `perspective_mismatch`
+- `prompt_drift`
+- `over_constrained_prompt`
+- `under_specified_prompt`
+- `low_commercial_value`
 - `artifact`
-- `bad_text`
-- `bad_anatomy`
-- `style_mismatch`
-- `unsafe`
+- `unsafe_or_brand_risk`
 - `excellent`
 
 ## Local Artifact Rules

@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
+    "clear:evaluations": "node scripts/clear-evaluations.js",
     "import:resource": "node scripts/import.js",
-    "check": "node --check server.js && node --check scripts/import.js && node --check scripts/selftest.js && node --check scripts/smoke.js && node --check src/db.js && node --check src/importer.js && node --check public/app.js",
+    "check": "node --check server.js && node --check scripts/clear-evaluations.js && node --check scripts/import.js && node --check scripts/selftest.js && node --check scripts/smoke.js && node --check src/db.js && node --check src/importer.js && node --check public/app.js",
     "selftest": "node scripts/selftest.js",
     "smoke": "node scripts/smoke.js"
   },

@@ -1,22 +1,56 @@
 const scoreFields = [
-  ["intent_score", "Original intent", "25%"],
-  ["source_fidelity_score", "Source fidelity", "20%"],
-  ["prompt_optimization_score", "Prompt optimization", "20%"],
-  ["visual_quality_score", "Visual quality", "15%"],
-  ["technical_quality_score", "Technical quality", "10%"],
-  ["safety_score", "Safety", "10%"],
+  [
+    "product_preservation_score",
+    "Product preservation",
+    "25%",
+    "Subject pixels, pose, size, position, identity, and silhouette remain unchanged.",
+  ],
+  [
+    "instruction_adherence_score",
+    "Instruction adherence",
+    "20%",
+    "Result follows the original prompt and optimized prompt without adding forbidden elements.",
+  ],
+  [
+    "integration_grounding_score",
+    "Scene integration",
+    "15%",
+    "Background, contact shadows, occlusion, lighting, and perspective make the fixed product feel grounded.",
+  ],
+  [
+    "prompt_optimization_value_score",
+    "Optimization value",
+    "15%",
+    "Optimized prompt adds useful constraints and clarity without over-constraining or drifting from intent.",
+  ],
+  [
+    "commercial_quality_score",
+    "Commercial quality",
+    "15%",
+    "Image is attractive, premium, clean, and usable for ecommerce or marketing review.",
+  ],
+  [
+    "technical_safety_score",
+    "Technical and safety",
+    "10%",
+    "No severe artifacts, broken geometry, unsafe content, brand-risk elements, or unreadable generated text.",
+  ],
 ];
 
 const tagOptions = [
-  "off_prompt",
-  "source_mismatch",
-  "over_optimized",
-  "under_specified",
+  "product_changed",
+  "product_moved",
+  "silhouette_damage",
+  "foreground_overlap",
+  "missing_contact_shadow",
+  "lighting_mismatch",
+  "perspective_mismatch",
+  "prompt_drift",
+  "over_constrained_prompt",
+  "under_specified_prompt",
+  "low_commercial_value",
   "artifact",
-  "bad_text",
-  "bad_anatomy",
-  "style_mismatch",
-  "unsafe",
+  "unsafe_or_brand_risk",
   "excellent",
 ];
 
@@ -74,13 +108,17 @@ function scoreValue(item, field) {
 
 function calculateOverall(form) {
   const value =
-    Number(form.intent_score) * 0.25 +
-    Number(form.source_fidelity_score) * 0.2 +
-    Number(form.prompt_optimization_score) * 0.2 +
-    Number(form.visual_quality_score) * 0.15 +
-    Number(form.technical_quality_score) * 0.1 +
-    Number(form.safety_score) * 0.1;
-  return value.toFixed(2);
+    Number(form.product_preservation_score) * 0.25 +
+    Number(form.instruction_adherence_score) * 0.2 +
+    Number(form.integration_grounding_score) * 0.15 +
+    Number(form.prompt_optimization_value_score) * 0.15 +
+    Number(form.commercial_quality_score) * 0.15 +
+    Number(form.technical_safety_score) * 0.1;
+  let gated = value;
+  if (Number(form.product_preservation_score) <= 2) gated = Math.min(gated, 2.5);
+  if (Number(form.instruction_adherence_score) <= 2) gated = Math.min(gated, 3);
+  if (Number(form.technical_safety_score) <= 1) gated = Math.min(gated, 2);
+  return gated.toFixed(2);
 }
 
 function isReviewed(item) {
@@ -265,14 +303,14 @@ function renderReviewPane() {
           <h3>Core Scores</h3>
           ${scoreFields
             .slice(0, 3)
-            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .map(([field, label, weight, help]) => scoreRow(field, label, weight, help, form[field]))
             .join("")}
         </div>
         <div class="score-box">
           <h3>Quality Scores</h3>
           ${scoreFields
             .slice(3)
-            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .map(([field, label, weight, help]) => scoreRow(field, label, weight, help, form[field]))
             .join("")}
         </div>
       </div>
@@ -352,12 +390,12 @@ function renderReviewPane() {
   });
 }
 
-function scoreRow(field, label, weight, value) {
+function scoreRow(field, label, weight, help, value) {
   return `
     <div class="score-row">
       <label for="${field}">
         ${label}
-        <small>Weight ${weight}</small>
+        <small>Weight ${weight}. ${help}</small>
       </label>
       <input id="${field}" name="${field}" type="range" min="1" max="5" step="1" value="${value}" />
       <span class="score-value" data-score-value="${field}">${value}</span>
@@ -382,6 +420,14 @@ function renderStats() {
             </header>
             <div class="bar"><span style="width:${percent}%"></span></div>
             <small>${row.reviewed_items || 0}/${row.total_items || 0} reviewed</small>
+            <small>
+              P ${row.avg_product_preservation_score ?? "--"} ·
+              I ${row.avg_instruction_adherence_score ?? "--"} ·
+              G ${row.avg_integration_grounding_score ?? "--"} ·
+              O ${row.avg_prompt_optimization_value_score ?? "--"} ·
+              C ${row.avg_commercial_quality_score ?? "--"} ·
+              T ${row.avg_technical_safety_score ?? "--"}
+            </small>
           </div>
         `;
       })

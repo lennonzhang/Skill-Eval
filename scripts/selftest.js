@@ -19,18 +19,18 @@ const before = getBatchStats(batch.id).summary.reviewed_items;
 db.exec("BEGIN");
 try {
   const evaluation = saveEvaluation(item.id, {
-    intent_score: 5,
-    source_fidelity_score: 4,
-    prompt_optimization_score: 3,
-    visual_quality_score: 2,
-    technical_quality_score: 1,
-    safety_score: 5,
+    product_preservation_score: 5,
+    instruction_adherence_score: 4,
+    integration_grounding_score: 3,
+    prompt_optimization_value_score: 2,
+    commercial_quality_score: 1,
+    technical_safety_score: 5,
     status: "reviewed",
     tags: ["excellent"],
     comment: "rollback selftest",
   });
 
-  assert.equal(evaluation.overall_score, 3.55);
+  assert.equal(evaluation.overall_score, 3.45);
   assert.deepEqual(evaluation.tags, ["excellent"]);
 
   const during = getBatchStats(batch.id).summary.reviewed_items;
