@@ -9,9 +9,11 @@ import {
   getBatches,
   getItemsForBatch,
   initializeDatabase,
+  itemExists,
   saveEvaluation,
 } from "./src/db.js";
 import { importResourceBatch } from "./src/importer.js";
+import { EvaluationValidationError } from "./public/scoring.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -39,7 +41,14 @@ async function readBody(req) {
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const error = new Error("Malformed JSON body");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 function contentTypeFor(filePath) {
@@ -67,9 +76,17 @@ function streamFile(res, filePath) {
 }
 
 function safeJoin(baseDir, requestPath) {
-  const decoded = decodeURIComponent(requestPath);
-  const target = path.normalize(path.join(baseDir, decoded));
-  if (!target.startsWith(baseDir)) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(requestPath);
+  } catch {
+    return null;
+  }
+
+  const base = path.resolve(baseDir);
+  const target = path.resolve(base, decoded);
+  const relative = path.relative(base, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
     return null;
   }
   return target;
@@ -108,9 +125,22 @@ async function handleApi(req, res, url) {
   const evaluationMatch = url.pathname.match(/^\/api\/items\/([^/]+)\/evaluation$/);
   if (req.method === "POST" && evaluationMatch) {
     const itemId = evaluationMatch[1];
+    if (!itemExists(itemId)) {
+      sendError(res, 404, "Item not found");
+      return;
+    }
+
     const body = await readBody(req);
-    const evaluation = saveEvaluation(itemId, body);
-    sendJson(res, 200, { evaluation });
+    try {
+      const evaluation = saveEvaluation(itemId, body);
+      sendJson(res, 200, { evaluation });
+    } catch (error) {
+      if (error instanceof EvaluationValidationError) {
+        sendError(res, 400, error.message, error.issues);
+        return;
+      }
+      throw error;
+    }
     return;
   }
 
@@ -153,6 +183,10 @@ const server = http.createServer(async (req, res) => {
     res.end(indexHtml);
   } catch (error) {
     console.error(error);
+    if (error?.statusCode === 400) {
+      sendError(res, 400, error.message);
+      return;
+    }
     sendError(res, 500, "Unexpected server error", error instanceof Error ? error.message : String(error));
   }
 });

@@ -39,7 +39,7 @@ Use pnpm scripts:
 pnpm run import:resource
 pnpm run dev
 pnpm run check
-pnpm run clear:evaluations
+pnpm run clear:evaluations -- --yes
 pnpm run selftest
 pnpm run smoke
 ```
@@ -49,7 +49,7 @@ Command details:
 - `pnpm run import:resource`: import `resource/*.json` and cache images.
 - `pnpm run dev`: start the local review server.
 - `pnpm run check`: syntax-check server, scripts, database/importer code, and frontend JS.
-- `pnpm run clear:evaluations`: delete all local evaluation records.
+- `pnpm run clear:evaluations -- --yes`: delete all local evaluation records. This is a local reset command and requires the explicit `--yes` guard.
 - `pnpm run selftest`: validate scoring persistence and statistics inside a rollback transaction.
 - `pnpm run smoke`: run read-only checks against a running local server.
 

@@ -26,6 +26,7 @@ const IMAGE_EXTENSIONS = new Map([
   ["image/gif", ".gif"],
   ["image/avif", ".avif"],
 ]);
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -101,16 +102,6 @@ function normalizeJsonPayload(payload) {
   return [payload];
 }
 
-function extensionFromUrl(url) {
-  try {
-    const ext = path.extname(new URL(url).pathname).toLowerCase();
-    if ([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"].includes(ext)) return ext;
-  } catch {
-    return ".jpg";
-  }
-  return ".jpg";
-}
-
 async function cacheImage({ url, batchId, itemId, kind }) {
   const itemDir = path.join(cacheDir, batchId, itemId);
   mkdirSync(itemDir, { recursive: true });
@@ -121,10 +112,18 @@ async function cacheImage({ url, batchId, itemId, kind }) {
   }
 
   const contentType = response.headers.get("content-type")?.split(";")[0]?.toLowerCase() || "";
-  const ext = IMAGE_EXTENSIONS.get(contentType) || extensionFromUrl(url);
+  const ext = IMAGE_EXTENSIONS.get(contentType);
+  if (!ext) {
+    throw new Error(`Unsupported image content-type: ${contentType || "missing"}`);
+  }
+
   const relativePath = path.join("data", "cache", batchId, itemId, `${kind}${ext}`);
   const absolutePath = path.join(rootDir, relativePath);
   const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > MAX_IMAGE_BYTES) {
+    throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
+  }
+
   await writeFile(absolutePath, buffer);
   return relativePath;
 }

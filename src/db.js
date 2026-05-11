@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
+import { calculateOverallScore, scoreFieldNames, validateEvaluationInput } from "../public/scoring.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const dataDir = path.join(rootDir, "data");
@@ -13,12 +15,7 @@ let db;
 const evaluationColumns = [
   "id",
   "item_id",
-  "product_preservation_score",
-  "instruction_adherence_score",
-  "integration_grounding_score",
-  "prompt_optimization_value_score",
-  "commercial_quality_score",
-  "technical_safety_score",
+  ...scoreFieldNames,
   "overall_score",
   "status",
   "tags",
@@ -262,29 +259,12 @@ export function getItemsForBatch(batchId) {
     }));
 }
 
-function clampScore(value, fallback = 3) {
-  const score = Number(value ?? fallback);
-  if (!Number.isFinite(score)) return fallback;
-  return Math.max(1, Math.min(5, Math.round(score)));
-}
-
-export function calculateOverallScore(evaluation) {
-  const weighted =
-    evaluation.product_preservation_score * 0.25 +
-    evaluation.instruction_adherence_score * 0.2 +
-    evaluation.integration_grounding_score * 0.15 +
-    evaluation.prompt_optimization_value_score * 0.15 +
-    evaluation.commercial_quality_score * 0.15 +
-    evaluation.technical_safety_score * 0.1;
-
-  let gated = weighted;
-  if (evaluation.product_preservation_score <= 2) gated = Math.min(gated, 2.5);
-  if (evaluation.instruction_adherence_score <= 2) gated = Math.min(gated, 3);
-  if (evaluation.technical_safety_score <= 1) gated = Math.min(gated, 2);
-  return Number(gated.toFixed(2));
+export function itemExists(itemId) {
+  return Boolean(getDatabase().prepare("SELECT 1 FROM items WHERE id = ?").get(itemId));
 }
 
 export function saveEvaluation(itemId, input) {
+  const validInput = validateEvaluationInput(input);
   const existing = getDatabase()
     .prepare("SELECT id, created_at FROM evaluations WHERE item_id = ?")
     .get(itemId);
@@ -292,15 +272,15 @@ export function saveEvaluation(itemId, input) {
   const evaluation = {
     id: existing?.id || crypto.randomUUID(),
     item_id: itemId,
-    product_preservation_score: clampScore(input.product_preservation_score),
-    instruction_adherence_score: clampScore(input.instruction_adherence_score),
-    integration_grounding_score: clampScore(input.integration_grounding_score),
-    prompt_optimization_value_score: clampScore(input.prompt_optimization_value_score),
-    commercial_quality_score: clampScore(input.commercial_quality_score),
-    technical_safety_score: clampScore(input.technical_safety_score),
-    status: String(input.status || "reviewed"),
-    tags: JSON.stringify(Array.isArray(input.tags) ? input.tags : []),
-    comment: String(input.comment || ""),
+    product_preservation_score: validInput.product_preservation_score,
+    instruction_adherence_score: validInput.instruction_adherence_score,
+    integration_grounding_score: validInput.integration_grounding_score,
+    prompt_optimization_value_score: validInput.prompt_optimization_value_score,
+    commercial_quality_score: validInput.commercial_quality_score,
+    technical_safety_score: validInput.technical_safety_score,
+    status: validInput.status,
+    tags: JSON.stringify(validInput.tags),
+    comment: validInput.comment,
     created_at: existing?.created_at || timestamp,
     updated_at: timestamp,
   };

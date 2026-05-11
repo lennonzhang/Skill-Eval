@@ -80,11 +80,13 @@ Before making code changes, inspect the current files and preserve unrelated use
 
 When validation commands exist, run the smallest relevant checks first, then broader build or test commands if runtime code changed. Report any commands that could not be run.
 
-Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations` for deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
+Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations -- --yes` for explicitly deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
 
 ## Worktree Rules
 
 Before creating a Git worktree, run `git worktree list` and inspect the target parent directory. Do not assume `.worktrees/` is available just because it exists; it may be owned by another agent or workflow. If `.worktrees/` is already in use, confirm the naming convention or choose a clearly named sibling directory and state why.
+
+Git worktrees do not require a project-level Codex switch. For local command-line work, `git worktree` is a native Git feature and can be used directly. Codex App may expose managed worktree UI for isolated tasks, but that is product/UI availability rather than a repository setting. Do not delay local worktree setup looking for a repo config flag.
 
 Preferred project-local layout, when available:
 
