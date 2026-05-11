@@ -1,0 +1,54 @@
+resource/*.json
+resource/**/*.json
+resources/*.json
+resources/**/*.json
+
+# Resource images are evaluation input/output data, not source assets.
+resource/*.png
+resource/*.jpg
+resource/*.jpeg
+resource/*.webp
+resource/*.gif
+resource/*.avif
+resource/**/*.png
+resource/**/*.jpg
+resource/**/*.jpeg
+resource/**/*.webp
+resource/**/*.gif
+resource/**/*.avif
+resources/*.png
+resources/*.jpg
+resources/*.jpeg
+resources/*.webp
+resources/*.gif
+resources/*.avif
+resources/**/*.png
+resources/**/*.jpg
+resources/**/*.jpeg
+resources/**/*.webp
+resources/**/*.gif
+resources/**/*.avif
+
+# Local imported/evaluated data and generated artifacts.
+data/
+cache/
+exports/
+output/
+outputs/
+reports/
+
+# SQLite runtime state.
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Node/frontend build outputs.
+node_modules/
+dist/
+.vite/
+
+# Local environment files.
+.env
+.env.*

@@ -1,0 +1,561 @@
+const scoreFields = [
+  ["intent_score", "Original intent", "25%"],
+  ["source_fidelity_score", "Source fidelity", "20%"],
+  ["prompt_optimization_score", "Prompt optimization", "20%"],
+  ["visual_quality_score", "Visual quality", "15%"],
+  ["technical_quality_score", "Technical quality", "10%"],
+  ["safety_score", "Safety", "10%"],
+];
+
+const tagOptions = [
+  "off_prompt",
+  "source_mismatch",
+  "over_optimized",
+  "under_specified",
+  "artifact",
+  "bad_text",
+  "bad_anatomy",
+  "style_mismatch",
+  "unsafe",
+  "excellent",
+];
+
+const state = {
+  batches: [],
+  selectedBatchId: "",
+  items: [],
+  stats: null,
+  selectedItemId: "",
+  filters: {
+    model: "all",
+    status: "all",
+    search: "",
+  },
+};
+
+const els = {
+  batchMeta: document.querySelector("#batchMeta"),
+  batchSelect: document.querySelector("#batchSelect"),
+  importButton: document.querySelector("#importButton"),
+  totalItems: document.querySelector("#totalItems"),
+  reviewedItems: document.querySelector("#reviewedItems"),
+  remainingItems: document.querySelector("#remainingItems"),
+  sourceCache: document.querySelector("#sourceCache"),
+  resultCache: document.querySelector("#resultCache"),
+  modelFilter: document.querySelector("#modelFilter"),
+  statusFilter: document.querySelector("#statusFilter"),
+  searchInput: document.querySelector("#searchInput"),
+  nextUnreviewedButton: document.querySelector("#nextUnreviewedButton"),
+  visibleCount: document.querySelector("#visibleCount"),
+  itemList: document.querySelector("#itemList"),
+  reviewPane: document.querySelector("#reviewPane"),
+  modelStats: document.querySelector("#modelStats"),
+  tagStats: document.querySelector("#tagStats"),
+  imageDialog: document.querySelector("#imageDialog"),
+  dialogImage: document.querySelector("#dialogImage"),
+  closeDialogButton: document.querySelector("#closeDialogButton"),
+};
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "content-type": "application/json" },
+    ...options,
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || "Request failed");
+  }
+  return body;
+}
+
+function scoreValue(item, field) {
+  return Number(item[field] || 3);
+}
+
+function calculateOverall(form) {
+  const value =
+    Number(form.intent_score) * 0.25 +
+    Number(form.source_fidelity_score) * 0.2 +
+    Number(form.prompt_optimization_score) * 0.2 +
+    Number(form.visual_quality_score) * 0.15 +
+    Number(form.technical_quality_score) * 0.1 +
+    Number(form.safety_score) * 0.1;
+  return value.toFixed(2);
+}
+
+function isReviewed(item) {
+  return item.overall_score !== null && item.overall_score !== undefined;
+}
+
+function selectedBatch() {
+  return state.batches.find((batch) => batch.id === state.selectedBatchId);
+}
+
+function filteredItems() {
+  const query = state.filters.search.trim().toLowerCase();
+  return state.items.filter((item) => {
+    if (state.filters.model !== "all" && item.model !== state.filters.model) return false;
+    if (state.filters.status === "reviewed" && !isReviewed(item)) return false;
+    if (state.filters.status === "unreviewed" && isReviewed(item)) return false;
+    if (!query) return true;
+    const haystack = [
+      item.model,
+      item.text,
+      item.optimization_prompt,
+      item.raw_json_file,
+      ...(Array.isArray(item.tags) ? item.tags : []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function renderBatchSelect() {
+  if (!state.batches.length) {
+    els.batchSelect.innerHTML = '<option value="">No batches</option>';
+    return;
+  }
+
+  els.batchSelect.innerHTML = state.batches
+    .map((batch) => {
+      const label = `${batch.name} (${batch.reviewed_count || 0}/${batch.item_count || 0})`;
+      return `<option value="${escapeHtml(batch.id)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  els.batchSelect.value = state.selectedBatchId;
+}
+
+function renderMetrics() {
+  const summary = state.stats?.summary || {};
+  els.totalItems.textContent = summary.total_items || 0;
+  els.reviewedItems.textContent = summary.reviewed_items || 0;
+  els.remainingItems.textContent = summary.unreviewed_items || 0;
+  els.sourceCache.textContent = `${summary.cached_source_images || 0}/${summary.total_items || 0}`;
+  els.resultCache.textContent = `${summary.cached_result_images || 0}/${summary.total_items || 0}`;
+
+  const batch = selectedBatch();
+  if (!batch) {
+    els.batchMeta.textContent = "No batch loaded";
+    return;
+  }
+  const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
+  els.batchMeta.textContent = `${batch.id} · ${imported}`;
+}
+
+function renderFilters() {
+  const models = [...new Set(state.items.map((item) => item.model))].sort();
+  els.modelFilter.innerHTML = [
+    '<option value="all">All models</option>',
+    ...models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`),
+  ].join("");
+  els.modelFilter.value = state.filters.model;
+}
+
+function renderItemList() {
+  const visible = filteredItems();
+  els.visibleCount.textContent = `${visible.length} visible`;
+
+  if (!visible.length) {
+    els.itemList.innerHTML = '<div class="empty-list">No matching items</div>';
+    return;
+  }
+
+  els.itemList.innerHTML = visible
+    .map((item) => {
+      const reviewed = isReviewed(item);
+      const score = reviewed ? Number(item.overall_score).toFixed(2) : "--";
+      return `
+        <button class="item-row ${item.id === state.selectedItemId ? "active" : ""}" data-id="${escapeHtml(item.id)}" type="button">
+          <div class="row-title">
+            <span class="model-pill">${escapeHtml(item.model)}</span>
+            <span class="status-pill ${reviewed ? "reviewed" : "unreviewed"}">${reviewed ? score : "Open"}</span>
+          </div>
+          <div class="row-prompt">${escapeHtml(item.text)}</div>
+          <div class="row-title">
+            <span>${escapeHtml(item.raw_json_file)} #${item.raw_index + 1}</span>
+            <span>${escapeHtml(item.source_fetch_status)}/${escapeHtml(item.result_fetch_status)}</span>
+          </div>
+        </button>
+      `;
+    })
+    .join("");
+
+  for (const button of els.itemList.querySelectorAll(".item-row")) {
+    button.addEventListener("click", () => {
+      state.selectedItemId = button.dataset.id;
+      render();
+    });
+  }
+}
+
+function imageHtml(item, kind) {
+  const isSource = kind === "source";
+  const path = isSource ? item.source_image_url : item.result_image_url;
+  const remote = isSource ? item.url : item.result_url;
+  const status = isSource ? item.source_fetch_status : item.result_fetch_status;
+  const error = isSource ? item.source_fetch_error : item.result_fetch_error;
+  if (path) {
+    return `<img src="${escapeHtml(path)}" alt="${isSource ? "Source image" : "Result image"}" data-full="${escapeHtml(path)}" />`;
+  }
+  return `
+    <div class="image-missing">
+      <strong>${escapeHtml(status || "missing")}</strong>
+      <p>${escapeHtml(error || "Image is not cached locally.")}</p>
+      <a href="${escapeHtml(remote)}" target="_blank" rel="noreferrer">Open remote URL</a>
+    </div>
+  `;
+}
+
+function renderReviewPane() {
+  const item = state.items.find((candidate) => candidate.id === state.selectedItemId);
+  if (!item) {
+    els.reviewPane.innerHTML = `
+      <div class="empty-state">
+        <div>
+          <h2>No item selected</h2>
+          <p>Select a row from the queue.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const form = Object.fromEntries(scoreFields.map(([field]) => [field, scoreValue(item, field)]));
+  const overall = item.overall_score ? Number(item.overall_score).toFixed(2) : calculateOverall(form);
+  const selectedTags = Array.isArray(item.tags) ? item.tags : [];
+
+  els.reviewPane.innerHTML = `
+    <div class="review-head">
+      <div>
+        <h2>${escapeHtml(item.model)}</h2>
+        <p>${escapeHtml(item.raw_json_file)} · item ${item.raw_index + 1} · ${escapeHtml(item.id)}</p>
+      </div>
+      <div class="score-badge">
+        <span>Overall</span>
+        <strong id="overallScore">${overall}</strong>
+      </div>
+    </div>
+
+    <div class="image-grid">
+      <div class="image-box">
+        <h3>Source Image</h3>
+        <div class="image-frame">${imageHtml(item, "source")}</div>
+      </div>
+      <div class="image-box">
+        <h3>Result Image</h3>
+        <div class="image-frame">${imageHtml(item, "result")}</div>
+      </div>
+    </div>
+
+    <div class="prompt-grid">
+      <div class="prompt-box">
+        <h3>Original Prompt</h3>
+        <pre>${escapeHtml(item.text)}</pre>
+      </div>
+      <div class="prompt-box">
+        <h3>Optimized Prompt</h3>
+        <pre>${escapeHtml(item.optimization_prompt)}</pre>
+      </div>
+    </div>
+
+    <form id="evaluationForm">
+      <div class="score-grid">
+        <div class="score-box">
+          <h3>Core Scores</h3>
+          ${scoreFields
+            .slice(0, 3)
+            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .join("")}
+        </div>
+        <div class="score-box">
+          <h3>Quality Scores</h3>
+          ${scoreFields
+            .slice(3)
+            .map(([field, label, weight]) => scoreRow(field, label, weight, form[field]))
+            .join("")}
+        </div>
+      </div>
+
+      <div class="review-controls">
+        <div class="comment-box">
+          <h3>Status</h3>
+          <div class="tag-grid">
+            <select id="statusSelect" name="status">
+              ${["reviewed", "needs_recheck", "failed"]
+                .map(
+                  (status) =>
+                    `<option value="${status}" ${item.status === status ? "selected" : ""}>${status}</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+        </div>
+        <div class="comment-box">
+          <h3>Comment</h3>
+          <textarea id="commentInput" name="comment" placeholder="Reviewer notes">${escapeHtml(item.comment || "")}</textarea>
+        </div>
+      </div>
+
+      <div class="comment-box" style="margin-top:12px">
+        <h3>Tags</h3>
+        <div class="tag-grid">
+          ${tagOptions
+            .map(
+              (tag) => `
+                <button class="tag-button ${selectedTags.includes(tag) ? "selected" : ""}" data-tag="${tag}" type="button">
+                  ${tag}
+                </button>
+              `
+            )
+            .join("")}
+        </div>
+      </div>
+
+      <div class="save-row">
+        <span class="save-note" id="saveNote">${item.evaluation_updated_at ? `Saved ${escapeHtml(new Date(item.evaluation_updated_at).toLocaleString())}` : "Not reviewed"}</span>
+        <button id="saveButton" type="submit">Save Review</button>
+      </div>
+    </form>
+  `;
+
+  const formEl = document.querySelector("#evaluationForm");
+  const currentTags = new Set(selectedTags);
+
+  for (const img of els.reviewPane.querySelectorAll("img[data-full]")) {
+    img.addEventListener("click", () => openImage(img.dataset.full, img.alt));
+  }
+
+  for (const input of formEl.querySelectorAll('input[type="range"]')) {
+    input.addEventListener("input", () => {
+      const output = formEl.querySelector(`[data-score-value="${input.name}"]`);
+      output.textContent = input.value;
+      document.querySelector("#overallScore").textContent = calculateOverall(readScoreForm(formEl));
+    });
+  }
+
+  for (const button of formEl.querySelectorAll(".tag-button")) {
+    button.addEventListener("click", () => {
+      if (currentTags.has(button.dataset.tag)) {
+        currentTags.delete(button.dataset.tag);
+        button.classList.remove("selected");
+      } else {
+        currentTags.add(button.dataset.tag);
+        button.classList.add("selected");
+      }
+    });
+  }
+
+  formEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveEvaluation(item.id, formEl, [...currentTags]);
+  });
+}
+
+function scoreRow(field, label, weight, value) {
+  return `
+    <div class="score-row">
+      <label for="${field}">
+        ${label}
+        <small>Weight ${weight}</small>
+      </label>
+      <input id="${field}" name="${field}" type="range" min="1" max="5" step="1" value="${value}" />
+      <span class="score-value" data-score-value="${field}">${value}</span>
+    </div>
+  `;
+}
+
+function renderStats() {
+  const byModel = state.stats?.by_model || [];
+  if (!byModel.length) {
+    els.modelStats.innerHTML = '<p class="muted">No reviewed models yet.</p>';
+  } else {
+    els.modelStats.innerHTML = byModel
+      .map((row) => {
+        const score = Number(row.avg_overall_score || 0);
+        const percent = Math.max(0, Math.min(100, (score / 5) * 100));
+        return `
+          <div class="model-stat">
+            <header>
+              <span>${escapeHtml(row.model)}</span>
+              <strong>${row.avg_overall_score ?? "--"}</strong>
+            </header>
+            <div class="bar"><span style="width:${percent}%"></span></div>
+            <small>${row.reviewed_items || 0}/${row.total_items || 0} reviewed</small>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  const tagCounts = state.stats?.tag_counts || [];
+  if (!tagCounts.length) {
+    els.tagStats.innerHTML = '<p class="muted">No tags yet.</p>';
+  } else {
+    els.tagStats.innerHTML = tagCounts
+      .map(
+        (row) => `
+          <div class="tag-stat">
+            <span>${escapeHtml(row.tag)}</span>
+            <strong>${row.count}</strong>
+          </div>
+        `
+      )
+      .join("");
+  }
+}
+
+function readScoreForm(formEl) {
+  return Object.fromEntries(scoreFields.map(([field]) => [field, formEl.elements[field].value]));
+}
+
+async function saveEvaluation(itemId, formEl, tags) {
+  const payload = {
+    ...readScoreForm(formEl),
+    status: formEl.elements.status.value,
+    comment: formEl.elements.comment.value,
+    tags,
+  };
+  const saveNote = document.querySelector("#saveNote");
+  saveNote.textContent = "Saving...";
+  await api(`/api/items/${itemId}/evaluation`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  saveNote.textContent = "Saved";
+  await loadBatch(state.selectedBatchId, itemId);
+}
+
+async function loadBatches() {
+  const body = await api("/api/batches");
+  state.batches = body.batches;
+  if (!state.selectedBatchId && state.batches.length) {
+    state.selectedBatchId = state.batches[0].id;
+  }
+  renderBatchSelect();
+}
+
+async function loadBatch(batchId, keepSelectedItemId = "") {
+  if (!batchId) {
+    state.items = [];
+    state.stats = null;
+    render();
+    return;
+  }
+  state.selectedBatchId = batchId;
+  const [itemsBody, statsBody] = await Promise.all([
+    api(`/api/batches/${batchId}/items`),
+    api(`/api/batches/${batchId}/stats`),
+  ]);
+  state.items = itemsBody.items;
+  state.stats = statsBody.stats;
+  const visible = filteredItems();
+  state.selectedItemId =
+    keepSelectedItemId && state.items.some((item) => item.id === keepSelectedItemId)
+      ? keepSelectedItemId
+      : visible[0]?.id || state.items[0]?.id || "";
+  await loadBatches();
+  render();
+}
+
+function render() {
+  renderBatchSelect();
+  renderMetrics();
+  renderFilters();
+  renderItemList();
+  renderReviewPane();
+  renderStats();
+}
+
+async function importBatch() {
+  els.importButton.disabled = true;
+  els.importButton.textContent = "Importing...";
+  try {
+    const body = await api("/api/import", {
+      method: "POST",
+      body: JSON.stringify({ downloadImages: true }),
+    });
+    state.selectedBatchId = body.batch.id;
+    await loadBatch(body.batch.id);
+  } finally {
+    els.importButton.disabled = false;
+    els.importButton.textContent = "Import Resource";
+  }
+}
+
+function jumpToNextUnreviewed() {
+  const visible = filteredItems();
+  const currentIndex = visible.findIndex((item) => item.id === state.selectedItemId);
+  const next = visible
+    .slice(Math.max(currentIndex + 1, 0))
+    .concat(visible.slice(0, Math.max(currentIndex + 1, 0)))
+    .find((item) => !isReviewed(item));
+  if (next) {
+    state.selectedItemId = next.id;
+    render();
+  }
+}
+
+function openImage(src, alt) {
+  els.dialogImage.src = src;
+  els.dialogImage.alt = alt || "";
+  els.imageDialog.showModal();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+els.batchSelect.addEventListener("change", () => {
+  loadBatch(els.batchSelect.value).catch(showFatalError);
+});
+
+els.importButton.addEventListener("click", () => {
+  importBatch().catch((error) => {
+    alert(error.message);
+  });
+});
+
+els.modelFilter.addEventListener("change", () => {
+  state.filters.model = els.modelFilter.value;
+  state.selectedItemId = filteredItems()[0]?.id || "";
+  render();
+});
+
+els.statusFilter.addEventListener("change", () => {
+  state.filters.status = els.statusFilter.value;
+  state.selectedItemId = filteredItems()[0]?.id || "";
+  render();
+});
+
+els.searchInput.addEventListener("input", () => {
+  state.filters.search = els.searchInput.value;
+  state.selectedItemId = filteredItems()[0]?.id || "";
+  render();
+});
+
+els.nextUnreviewedButton.addEventListener("click", jumpToNextUnreviewed);
+els.closeDialogButton.addEventListener("click", () => els.imageDialog.close());
+
+function showFatalError(error) {
+  els.reviewPane.innerHTML = `
+    <div class="empty-state">
+      <div>
+        <h2>Unable to load</h2>
+        <p>${escapeHtml(error.message)}</p>
+      </div>
+    </div>
+  `;
+}
+
+await loadBatches();
+if (state.selectedBatchId) {
+  await loadBatch(state.selectedBatchId).catch(showFatalError);
+} else {
+  render();
+}

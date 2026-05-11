@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skill Eval Review</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Skill Eval Review</h1>
+          <p id="batchMeta">No batch loaded</p>
+        </div>
+        <div class="topbar-actions">
+          <select id="batchSelect" aria-label="Batch"></select>
+          <button id="importButton" type="button">Import Resource</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Batch statistics">
+        <div class="metric">
+          <span>Total</span>
+          <strong id="totalItems">0</strong>
+        </div>
+        <div class="metric">
+          <span>Reviewed</span>
+          <strong id="reviewedItems">0</strong>
+        </div>
+        <div class="metric">
+          <span>Remaining</span>
+          <strong id="remainingItems">0</strong>
+        </div>
+        <div class="metric">
+          <span>Source Cache</span>
+          <strong id="sourceCache">0</strong>
+        </div>
+        <div class="metric">
+          <span>Result Cache</span>
+          <strong id="resultCache">0</strong>
+        </div>
+      </section>
+
+      <section class="filters" aria-label="Review filters">
+        <label>
+          Model
+          <select id="modelFilter"></select>
+        </label>
+        <label>
+          Status
+          <select id="statusFilter">
+            <option value="all">All</option>
+            <option value="unreviewed">Unreviewed</option>
+            <option value="reviewed">Reviewed</option>
+          </select>
+        </label>
+        <label>
+          Search
+          <input id="searchInput" type="search" placeholder="Prompt, tag, file..." />
+        </label>
+        <button id="nextUnreviewedButton" type="button">Next Unreviewed</button>
+      </section>
+
+      <section class="workspace">
+        <aside class="queue" aria-label="Items">
+          <div class="queue-header">
+            <strong>Items</strong>
+            <span id="visibleCount">0 visible</span>
+          </div>
+          <div id="itemList" class="item-list"></div>
+        </aside>
+
+        <section id="reviewPane" class="review-pane" aria-live="polite">
+          <div class="empty-state">
+            <h2>Select or import a batch</h2>
+            <p>Use the batch menu or import local resource JSON to begin.</p>
+          </div>
+        </section>
+
+        <aside class="stats-panel" aria-label="Model statistics">
+          <div class="stats-block">
+            <h2>Model Scores</h2>
+            <div id="modelStats"></div>
+          </div>
+          <div class="stats-block">
+            <h2>Issue Tags</h2>
+            <div id="tagStats"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <dialog id="imageDialog">
+      <button id="closeDialogButton" type="button" aria-label="Close image">Close</button>
+      <img id="dialogImage" alt="" />
+    </dialog>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
