@@ -6,6 +6,11 @@ const state = {
   items: [],
   stats: null,
   selectedItemId: "",
+  compareMode: "side-by-side",
+  overlayOpacity: 55,
+  overlayTop: "source",
+  overlayBlink: false,
+  imageSizes: {},
   filters: {
     model: "all",
     status: "all",
@@ -183,6 +188,129 @@ function imageHtml(item, kind) {
   `;
 }
 
+function resetOverlayState() {
+  state.compareMode = "side-by-side";
+  state.overlayOpacity = 55;
+  state.overlayTop = "source";
+  state.overlayBlink = false;
+}
+
+function renderImageCompare(item) {
+  return `
+    <div class="compare-shell">
+      <div class="compare-tabs">
+        <button class="compare-tab ${state.compareMode === "side-by-side" ? "active" : ""}" data-compare-mode="side-by-side" type="button">
+          Side by Side
+        </button>
+        <button class="compare-tab ${state.compareMode === "overlay" ? "active" : ""}" data-compare-mode="overlay" type="button">
+          Overlay
+        </button>
+      </div>
+      <div id="imageCompareRegion">
+        ${state.compareMode === "overlay" ? renderOverlayImages(item) : renderSideBySideImages(item)}
+      </div>
+    </div>
+  `;
+}
+
+function renderSideBySideImages(item) {
+  return `
+    <div class="image-grid">
+      <div class="image-box">
+        <h3>Source Image</h3>
+        <div class="image-frame">${imageHtml(item, "source")}</div>
+      </div>
+      <div class="image-box">
+        <h3>Result Image</h3>
+        <div class="image-frame">${imageHtml(item, "result")}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderOverlayImages(item) {
+  const sourcePath = item.source_image_url;
+  const resultPath = item.result_image_url;
+  if (!sourcePath || !resultPath) {
+    return `
+      <div class="overlay-unavailable">
+        <strong>Overlay unavailable</strong>
+        <p>Both cached source and result images are required for overlay comparison.</p>
+      </div>
+    `;
+  }
+
+  const topKind = state.overlayTop;
+  const baseKind = topKind === "source" ? "result" : "source";
+  const topSrc = topKind === "source" ? sourcePath : resultPath;
+  const baseSrc = baseKind === "source" ? sourcePath : resultPath;
+  const topAlt = topKind === "source" ? "Source image overlay" : "Result image overlay";
+  const baseAlt = baseKind === "source" ? "Source image base" : "Result image base";
+  const opacity = state.overlayOpacity / 100;
+  const swapLabel = topKind === "source" ? "Source over Result" : "Result over Source";
+
+  return `
+    <div class="overlay-panel">
+      <div class="overlay-tools">
+        <label class="overlay-opacity-control">
+          <span>Opacity</span>
+          <input id="overlayOpacity" type="range" min="0" max="100" step="1" value="${state.overlayOpacity}" />
+          <strong id="overlayOpacityValue">${state.overlayOpacity}%</strong>
+        </label>
+        <button id="overlaySwapButton" class="secondary" type="button">${swapLabel}</button>
+        <button id="overlayBlinkButton" class="secondary ${state.overlayBlink ? "active" : ""}" type="button">
+          Blink ${state.overlayBlink ? "On" : "Off"}
+        </button>
+      </div>
+      <div class="overlay-stage ${state.overlayBlink ? "blinking" : ""}" style="--overlay-opacity:${opacity}">
+        <img class="overlay-img base" src="${escapeHtml(baseSrc)}" alt="${escapeHtml(baseAlt)}" data-full="${escapeHtml(baseSrc)}" data-size-kind="${baseKind}" />
+        <img class="overlay-img top" src="${escapeHtml(topSrc)}" alt="${escapeHtml(topAlt)}" data-full="${escapeHtml(topSrc)}" data-size-kind="${topKind}" style="opacity:${opacity}" />
+      </div>
+      <div class="overlay-meta" id="overlayMeta">${escapeHtml(overlayMetaText(item))}</div>
+    </div>
+  `;
+}
+
+function overlayMetaText(item) {
+  const sizes = state.imageSizes[item.id];
+  if (!sizes?.source || !sizes?.result) {
+    return "Image size unavailable";
+  }
+  const source = `${sizes.source.width} x ${sizes.source.height}`;
+  const result = `${sizes.result.width} x ${sizes.result.height}`;
+  const aligned =
+    sizes.source.width === sizes.result.width && sizes.source.height === sizes.result.height
+      ? "Pixel-aligned"
+      : "Aspect-fit only, not pixel-perfect";
+  return `Source: ${source} · Result: ${result} · ${aligned}`;
+}
+
+function loadImageSize(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function ensureImageSizes(item) {
+  if (!item.source_image_url || !item.result_image_url || state.imageSizes[item.id]) return;
+  try {
+    const [source, result] = await Promise.all([
+      loadImageSize(item.source_image_url),
+      loadImageSize(item.result_image_url),
+    ]);
+    state.imageSizes[item.id] = { source, result };
+    const meta = document.querySelector("#overlayMeta");
+    if (meta && state.selectedItemId === item.id) {
+      meta.textContent = overlayMetaText(item);
+    }
+  } catch {
+    state.imageSizes[item.id] = { source: null, result: null };
+  }
+}
+
 function renderReviewPane() {
   const item = state.items.find((candidate) => candidate.id === state.selectedItemId);
   if (!item) {
@@ -213,16 +341,7 @@ function renderReviewPane() {
       </div>
     </div>
 
-    <div class="image-grid">
-      <div class="image-box">
-        <h3>Source Image</h3>
-        <div class="image-frame">${imageHtml(item, "source")}</div>
-      </div>
-      <div class="image-box">
-        <h3>Result Image</h3>
-        <div class="image-frame">${imageHtml(item, "result")}</div>
-      </div>
-    </div>
+    ${renderImageCompare(item)}
 
     <div class="prompt-grid">
       <div class="prompt-box">
@@ -297,6 +416,45 @@ function renderReviewPane() {
 
   const formEl = document.querySelector("#evaluationForm");
   const currentTags = new Set(selectedTags);
+
+  ensureImageSizes(item);
+
+  for (const button of els.reviewPane.querySelectorAll("[data-compare-mode]")) {
+    button.addEventListener("click", () => {
+      state.compareMode = button.dataset.compareMode;
+      render();
+    });
+  }
+
+  const opacityInput = document.querySelector("#overlayOpacity");
+  if (opacityInput) {
+    opacityInput.addEventListener("input", () => {
+      state.overlayOpacity = Number(opacityInput.value);
+      const opacity = state.overlayOpacity / 100;
+      const top = document.querySelector(".overlay-img.top");
+      const stage = document.querySelector(".overlay-stage");
+      const value = document.querySelector("#overlayOpacityValue");
+      if (top) top.style.opacity = String(opacity);
+      if (stage) stage.style.setProperty("--overlay-opacity", String(opacity));
+      if (value) value.textContent = `${state.overlayOpacity}%`;
+    });
+  }
+
+  const swapButton = document.querySelector("#overlaySwapButton");
+  if (swapButton) {
+    swapButton.addEventListener("click", () => {
+      state.overlayTop = state.overlayTop === "source" ? "result" : "source";
+      render();
+    });
+  }
+
+  const blinkButton = document.querySelector("#overlayBlinkButton");
+  if (blinkButton) {
+    blinkButton.addEventListener("click", () => {
+      state.overlayBlink = !state.overlayBlink;
+      render();
+    });
+  }
 
   for (const img of els.reviewPane.querySelectorAll("img[data-full]")) {
     img.addEventListener("click", () => openImage(img.dataset.full, img.alt));
@@ -436,6 +594,7 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     els.searchInput.value = "";
     els.statusFilter.value = "all";
   }
+  const previousSelectedItemId = state.selectedItemId;
   const [itemsBody, statsBody] = await Promise.all([
     api(`/api/batches/${batchId}/items`),
     api(`/api/batches/${batchId}/stats`),
@@ -447,6 +606,9 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     keepSelectedItemId && state.items.some((item) => item.id === keepSelectedItemId)
       ? keepSelectedItemId
       : visible[0]?.id || state.items[0]?.id || "";
+  if (state.selectedItemId !== previousSelectedItemId) {
+    resetOverlayState();
+  }
   await loadBatches();
   render();
 }

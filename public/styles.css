@@ -346,6 +346,35 @@ button.secondary:hover {
   margin-top: 12px;
 }
 
+.compare-shell {
+  margin-top: 12px;
+}
+
+.compare-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.compare-tab {
+  min-height: 32px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--ink);
+  border-color: transparent;
+}
+
+.compare-tab:hover,
+.compare-tab.active {
+  transform: none;
+  background: var(--ink);
+  color: white;
+  border-color: var(--ink);
+}
+
 .prompt-box,
 .image-box,
 .score-box,
@@ -410,6 +439,119 @@ button.secondary:hover {
   color: var(--bad);
   text-align: center;
   font-size: 13px;
+}
+
+.overlay-panel,
+.overlay-unavailable {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.overlay-unavailable {
+  padding: 18px;
+  color: var(--muted);
+}
+
+.overlay-unavailable strong {
+  display: block;
+  color: var(--bad);
+  margin-bottom: 6px;
+}
+
+.overlay-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.overlay-opacity-control {
+  display: grid;
+  grid-template-columns: auto 180px 46px;
+  gap: 9px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overlay-opacity-control input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.overlay-opacity-control strong {
+  color: var(--ink);
+  text-align: right;
+}
+
+.overlay-tools button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.overlay-stage {
+  --overlay-opacity: 0.55;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 520px;
+  max-height: 72vh;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background:
+    linear-gradient(45deg, #e8e4da 25%, transparent 25%),
+    linear-gradient(-45deg, #e8e4da 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e8e4da 75%),
+    linear-gradient(-45deg, transparent 75%, #e8e4da 75%),
+    #f7f4ec;
+  background-position:
+    0 0,
+    0 10px,
+    10px -10px,
+    -10px 0;
+  background-size: 20px 20px;
+}
+
+.overlay-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+.overlay-img.top {
+  pointer-events: auto;
+}
+
+.overlay-stage.blinking .overlay-img.top {
+  animation: overlayBlink 1s steps(1, end) infinite;
+}
+
+@keyframes overlayBlink {
+  0%,
+  49% {
+    opacity: var(--overlay-opacity);
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.overlay-meta {
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .score-box {
