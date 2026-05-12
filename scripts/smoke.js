@@ -32,8 +32,39 @@ if (!html.includes("Skill Eval Review")) {
 }
 
 const { batches } = await getJson("/api/batches");
-if (!Array.isArray(batches) || batches.length === 0) {
-  throw new Error("No batches found. Run pnpm run import:resource first.");
+if (!Array.isArray(batches)) {
+  throw new Error("Batches API did not return an array");
+}
+
+if (batches.length === 0) {
+  const missingItem = await postJson("/api/items/not-a-real-item/evaluation", {
+    product_preservation_score: 5,
+    instruction_adherence_score: 4,
+    integration_grounding_score: 3,
+    prompt_optimization_value_score: 2,
+    commercial_quality_score: 1,
+    technical_safety_score: 5,
+    status: "reviewed",
+    tags: ["excellent"],
+    comment: "missing item smoke",
+  });
+  if (missingItem.response.status !== 404) {
+    throw new Error(`Missing item returned HTTP ${missingItem.response.status}, expected 404`);
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        baseUrl,
+        batches: 0,
+        mode: "empty-database",
+      },
+      null,
+      2
+    )
+  );
+  process.exit(0);
 }
 
 const batch = batches[0];

@@ -112,11 +112,26 @@ button.secondary:hover {
 .topbar-actions {
   display: flex;
   gap: 10px;
+  align-items: center;
 }
 
 .topbar select {
   width: 360px;
   min-height: 36px;
+}
+
+.language-control {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.language-control select {
+  width: 96px;
+  min-height: 36px;
+  padding: 0 8px;
+  color: var(--ink);
 }
 
 .metrics {

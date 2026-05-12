@@ -10,62 +10,69 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <h1>Skill Eval Review</h1>
+          <h1 data-i18n="app.title">Skill Eval Review</h1>
           <p id="batchMeta">No batch loaded</p>
         </div>
         <div class="topbar-actions">
-          <select id="batchSelect" aria-label="Batch"></select>
-          <button id="importButton" type="button">Import Resource</button>
+          <label class="language-control">
+            <span data-i18n="app.language">Language</span>
+            <select id="languageSelect" aria-label="Language">
+              <option value="en">EN</option>
+              <option value="zh">中文</option>
+            </select>
+          </label>
+          <select id="batchSelect" aria-label="Batch" data-i18n-aria-label="app.batch"></select>
+          <button id="importButton" type="button" data-i18n="actions.importResource">Import Resource</button>
         </div>
       </header>
 
-      <section class="metrics" aria-label="Batch statistics">
+      <section class="metrics" aria-label="Batch statistics" data-i18n-aria-label="metrics.aria">
         <div class="metric">
-          <span>Total</span>
+          <span data-i18n="metrics.total">Total</span>
           <strong id="totalItems">0</strong>
         </div>
         <div class="metric">
-          <span>Reviewed</span>
+          <span data-i18n="metrics.reviewed">Reviewed</span>
           <strong id="reviewedItems">0</strong>
         </div>
         <div class="metric">
-          <span>Remaining</span>
+          <span data-i18n="metrics.remaining">Remaining</span>
           <strong id="remainingItems">0</strong>
         </div>
         <div class="metric">
-          <span>Source Cache</span>
+          <span data-i18n="metrics.sourceCache">Source Cache</span>
           <strong id="sourceCache">0</strong>
         </div>
         <div class="metric">
-          <span>Result Cache</span>
+          <span data-i18n="metrics.resultCache">Result Cache</span>
           <strong id="resultCache">0</strong>
         </div>
       </section>
 
-      <section class="filters" aria-label="Review filters">
+      <section class="filters" aria-label="Review filters" data-i18n-aria-label="filters.aria">
         <label>
-          Model
+          <span data-i18n="filters.model">Model</span>
           <select id="modelFilter"></select>
         </label>
         <label>
-          Status
+          <span data-i18n="filters.status">Status</span>
           <select id="statusFilter">
-            <option value="all">All</option>
-            <option value="unreviewed">Unreviewed</option>
-            <option value="reviewed">Reviewed</option>
+            <option value="all" data-i18n="filters.all">All</option>
+            <option value="unreviewed" data-i18n="filters.unreviewed">Unreviewed</option>
+            <option value="reviewed" data-i18n="filters.reviewed">Reviewed</option>
           </select>
         </label>
         <label>
-          Search
-          <input id="searchInput" type="search" placeholder="Prompt, tag, file..." />
+          <span data-i18n="filters.search">Search</span>
+          <input id="searchInput" type="search" placeholder="Prompt, tag, file..." data-i18n-placeholder="filters.searchPlaceholder" />
         </label>
-        <button id="nextUnreviewedButton" type="button">Next Unreviewed</button>
+        <button id="nextUnreviewedButton" type="button" data-i18n="actions.nextUnreviewed">Next Unreviewed</button>
       </section>
 
       <section class="workspace">
-        <aside class="queue" aria-label="Items">
+        <aside class="queue" aria-label="Items" data-i18n-aria-label="queue.aria">
           <div class="queue-header">
-            <strong>Items</strong>
+            <strong data-i18n="queue.title">Items</strong>
             <span id="visibleCount">0 visible</span>
           </div>
           <div id="itemList" class="item-list"></div>
@@ -73,18 +80,18 @@
 
         <section id="reviewPane" class="review-pane" aria-live="polite">
           <div class="empty-state">
-            <h2>Select or import a batch</h2>
-            <p>Use the batch menu or import local resource JSON to begin.</p>
+            <h2 data-i18n="empty.initialTitle">Select or import a batch</h2>
+            <p data-i18n="empty.initialBody">Use the batch menu or import local resource JSON to begin.</p>
           </div>
         </section>
 
-        <aside class="stats-panel" aria-label="Model statistics">
+        <aside class="stats-panel" aria-label="Model statistics" data-i18n-aria-label="stats.aria">
           <div class="stats-block">
-            <h2>Model Scores</h2>
+            <h2 data-i18n="stats.modelScores">Model Scores</h2>
             <div id="modelStats"></div>
           </div>
           <div class="stats-block">
-            <h2>Issue Tags</h2>
+            <h2 data-i18n="stats.issueTags">Issue Tags</h2>
             <div id="tagStats"></div>
           </div>
         </aside>
@@ -92,7 +99,7 @@
     </main>
 
     <dialog id="imageDialog">
-      <button id="closeDialogButton" type="button" aria-label="Close image">Close</button>
+      <button id="closeDialogButton" type="button" aria-label="Close image" data-i18n="actions.close" data-i18n-aria-label="image.closeAria">Close</button>
       <img id="dialogImage" alt="" />
     </dialog>
 

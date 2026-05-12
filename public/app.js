@@ -1,6 +1,232 @@
 import { calculateOverallScore, scoreFields, statusOptions, tagOptions } from "./scoring.js";
 
+const translations = {
+  en: {
+    "app.title": "Skill Eval Review",
+    "app.language": "Language",
+    "app.batch": "Batch",
+    "actions.importResource": "Import Resource",
+    "actions.importing": "Importing...",
+    "actions.nextUnreviewed": "Next Unreviewed",
+    "actions.close": "Close",
+    "actions.saveReview": "Save Review",
+    "actions.retry": "Retry",
+    "actions.retrying": "Retrying...",
+    "actions.openRemoteUrl": "Open remote URL",
+    "metrics.aria": "Batch statistics",
+    "metrics.total": "Total",
+    "metrics.reviewed": "Reviewed",
+    "metrics.remaining": "Remaining",
+    "metrics.sourceCache": "Source Cache",
+    "metrics.resultCache": "Result Cache",
+    "filters.aria": "Review filters",
+    "filters.model": "Model",
+    "filters.status": "Status",
+    "filters.all": "All",
+    "filters.unreviewed": "Unreviewed",
+    "filters.reviewed": "Reviewed",
+    "filters.search": "Search",
+    "filters.searchPlaceholder": "Prompt, tag, file...",
+    "filters.allModels": "All models",
+    "queue.aria": "Items",
+    "queue.title": "Items",
+    "queue.visible": "{count} visible",
+    "queue.noMatching": "No matching items",
+    "review.open": "Open",
+    "review.reviewed": "Reviewed",
+    "review.notReviewed": "Not reviewed",
+    "review.saved": "Saved",
+    "review.saving": "Saving...",
+    "review.savedAt": "Saved {time}",
+    "review.noItemTitle": "No item selected",
+    "review.noItemBody": "Select a row from the queue.",
+    "review.itemMeta": "{file} | item {index} | {id}",
+    "review.evaluation": "Evaluation",
+    "review.overall": "Overall",
+    "review.coreScores": "Core Scores",
+    "review.qualityScores": "Quality Scores",
+    "review.status": "Status",
+    "review.comment": "Comment",
+    "review.commentPlaceholder": "Reviewer notes",
+    "review.tags": "Tags",
+    "review.originalPrompt": "Original Prompt",
+    "review.optimizedPrompt": "Optimized Prompt",
+    "empty.initialTitle": "Select or import a batch",
+    "empty.initialBody": "Use the batch menu or import local resource JSON to begin.",
+    "empty.noBatch": "No batch loaded",
+    "empty.noBatches": "No batches",
+    "stats.aria": "Model statistics",
+    "stats.modelScores": "Model Scores",
+    "stats.issueTags": "Issue Tags",
+    "stats.noReviewedModels": "No reviewed models yet.",
+    "stats.noTags": "No tags yet.",
+    "stats.reviewedCount": "{reviewed}/{total} reviewed",
+    "image.source": "Source Image",
+    "image.result": "Result Image",
+    "image.sourceAlt": "Source image",
+    "image.resultAlt": "Result image",
+    "image.notCached": "Image is not cached locally.",
+    "image.localLoadFailed": "Cached image failed to load locally.",
+    "image.retryFailed": "Image retry failed.",
+    "image.closeAria": "Close image",
+    "fetch.success": "success",
+    "fetch.failed": "failed",
+    "fetch.pending": "pending",
+    "fetch.skipped": "skipped",
+    "fetch.missing": "missing",
+    "compare.sideBySide": "Side by Side",
+    "compare.overlay": "Overlay",
+    "overlay.unavailableTitle": "Overlay unavailable",
+    "overlay.unavailableBody": "Both cached source and result images must load before overlay comparison is available.",
+    "overlay.sourceAlt": "Source image overlay",
+    "overlay.resultAlt": "Result image overlay",
+    "overlay.sourceBaseAlt": "Source image base",
+    "overlay.resultBaseAlt": "Result image base",
+    "overlay.opacity": "Opacity",
+    "overlay.sourceOverResult": "Source over Result",
+    "overlay.resultOverSource": "Result over Source",
+    "overlay.blinkOn": "Blink On",
+    "overlay.blinkOff": "Blink Off",
+    "overlay.sizeUnavailable": "Image size unavailable",
+    "overlay.pixelAligned": "Pixel-aligned",
+    "overlay.aspectFitOnly": "Aspect-fit only, not pixel-perfect",
+    "overlay.meta": "Source: {source} | Result: {result} | {aligned}",
+    "error.unableTitle": "Unable to load",
+    "score.weight": "Weight {weight}. {help}",
+    "score.product_preservation_score.label": "Product preservation",
+    "score.product_preservation_score.help": "Subject pixels, pose, size, position, identity, and silhouette remain unchanged.",
+    "score.instruction_adherence_score.label": "Instruction adherence",
+    "score.instruction_adherence_score.help": "Result follows the original prompt and optimized prompt without adding forbidden elements.",
+    "score.integration_grounding_score.label": "Scene integration",
+    "score.integration_grounding_score.help": "Background, contact shadows, occlusion, lighting, and perspective make the fixed product feel grounded.",
+    "score.prompt_optimization_value_score.label": "Optimization value",
+    "score.prompt_optimization_value_score.help": "Optimized prompt adds useful constraints and clarity without over-constraining or drifting from intent.",
+    "score.commercial_quality_score.label": "Commercial quality",
+    "score.commercial_quality_score.help": "Image is attractive, premium, clean, and usable for ecommerce or marketing review.",
+    "score.technical_safety_score.label": "Technical and safety",
+    "score.technical_safety_score.help": "No severe artifacts, broken geometry, unsafe content, brand-risk elements, or unreadable generated text.",
+    "status.reviewed": "reviewed",
+    "status.needs_recheck": "needs_recheck",
+    "status.failed": "failed",
+  },
+  zh: {
+    "app.title": "Skill Eval 评审",
+    "app.language": "语言",
+    "app.batch": "批次",
+    "actions.importResource": "导入资源",
+    "actions.importing": "导入中...",
+    "actions.nextUnreviewed": "下一个未评审",
+    "actions.close": "关闭",
+    "actions.saveReview": "保存评审",
+    "actions.retry": "重试",
+    "actions.retrying": "重试中...",
+    "actions.openRemoteUrl": "打开远程链接",
+    "metrics.aria": "批次统计",
+    "metrics.total": "总数",
+    "metrics.reviewed": "已评审",
+    "metrics.remaining": "剩余",
+    "metrics.sourceCache": "原图缓存",
+    "metrics.resultCache": "结果缓存",
+    "filters.aria": "评审筛选",
+    "filters.model": "模型",
+    "filters.status": "状态",
+    "filters.all": "全部",
+    "filters.unreviewed": "未评审",
+    "filters.reviewed": "已评审",
+    "filters.search": "搜索",
+    "filters.searchPlaceholder": "提示词、标签、文件...",
+    "filters.allModels": "全部模型",
+    "queue.aria": "条目",
+    "queue.title": "条目",
+    "queue.visible": "显示 {count} 条",
+    "queue.noMatching": "没有匹配条目",
+    "review.open": "待评审",
+    "review.reviewed": "已评审",
+    "review.notReviewed": "未评审",
+    "review.saved": "已保存",
+    "review.saving": "保存中...",
+    "review.savedAt": "已保存 {time}",
+    "review.noItemTitle": "未选择条目",
+    "review.noItemBody": "从左侧队列选择一条记录。",
+    "review.itemMeta": "{file} | 第 {index} 条 | {id}",
+    "review.evaluation": "评审",
+    "review.overall": "总分",
+    "review.coreScores": "核心评分",
+    "review.qualityScores": "质量评分",
+    "review.status": "状态",
+    "review.comment": "备注",
+    "review.commentPlaceholder": "评审备注",
+    "review.tags": "标签",
+    "review.originalPrompt": "原始提示词",
+    "review.optimizedPrompt": "优化提示词",
+    "empty.initialTitle": "选择或导入批次",
+    "empty.initialBody": "使用批次菜单，或导入本地 resource JSON 开始。",
+    "empty.noBatch": "未加载批次",
+    "empty.noBatches": "没有批次",
+    "stats.aria": "模型统计",
+    "stats.modelScores": "模型分数",
+    "stats.issueTags": "问题标签",
+    "stats.noReviewedModels": "还没有已评审模型。",
+    "stats.noTags": "还没有标签。",
+    "stats.reviewedCount": "已评审 {reviewed}/{total}",
+    "image.source": "原图",
+    "image.result": "结果图",
+    "image.sourceAlt": "原图",
+    "image.resultAlt": "结果图",
+    "image.notCached": "图片未缓存到本地。",
+    "image.localLoadFailed": "本地缓存图片加载失败。",
+    "image.retryFailed": "图片重试失败。",
+    "image.closeAria": "关闭图片",
+    "fetch.success": "成功",
+    "fetch.failed": "失败",
+    "fetch.pending": "等待中",
+    "fetch.skipped": "已跳过",
+    "fetch.missing": "缺失",
+    "compare.sideBySide": "并排",
+    "compare.overlay": "叠图",
+    "overlay.unavailableTitle": "叠图不可用",
+    "overlay.unavailableBody": "原图和结果图都已缓存且可加载后，才能使用叠图对比。",
+    "overlay.sourceAlt": "原图叠图",
+    "overlay.resultAlt": "结果图叠图",
+    "overlay.sourceBaseAlt": "原图底图",
+    "overlay.resultBaseAlt": "结果图底图",
+    "overlay.opacity": "透明度",
+    "overlay.sourceOverResult": "原图在上",
+    "overlay.resultOverSource": "结果图在上",
+    "overlay.blinkOn": "闪烁 开",
+    "overlay.blinkOff": "闪烁 关",
+    "overlay.sizeUnavailable": "图片尺寸不可用",
+    "overlay.pixelAligned": "像素对齐",
+    "overlay.aspectFitOnly": "仅按比例适配，非像素级对齐",
+    "overlay.meta": "原图: {source} | 结果图: {result} | {aligned}",
+    "error.unableTitle": "加载失败",
+    "score.weight": "权重 {weight}。{help}",
+    "score.product_preservation_score.label": "产品保真",
+    "score.product_preservation_score.help": "主体像素、姿态、尺寸、位置、身份和轮廓保持不变。",
+    "score.instruction_adherence_score.label": "指令遵循",
+    "score.instruction_adherence_score.help": "结果遵循原始提示词和优化提示词，且不添加禁止元素。",
+    "score.integration_grounding_score.label": "场景融合",
+    "score.integration_grounding_score.help": "背景、接触阴影、遮挡、光照和透视让固定产品自然落位。",
+    "score.prompt_optimization_value_score.label": "提示词优化价值",
+    "score.prompt_optimization_value_score.help": "优化提示词增加了有用约束和清晰度，同时不过度约束或偏离意图。",
+    "score.commercial_quality_score.label": "商业质感",
+    "score.commercial_quality_score.help": "图像美观、高级、干净，可用于电商或营销评审。",
+    "score.technical_safety_score.label": "技术与安全",
+    "score.technical_safety_score.help": "无严重伪影、几何错误、不安全内容、品牌风险元素或不可读生成文字。",
+    "status.reviewed": "已评审",
+    "status.needs_recheck": "需复查",
+    "status.failed": "失败",
+  },
+};
+
+function initialLanguage() {
+  const saved = localStorage.getItem("skill-eval-language");
+  if (saved && translations[saved]) return saved;
+  return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
 const state = {
+  language: initialLanguage(),
   batches: [],
   selectedBatchId: "",
   items: [],
@@ -22,6 +248,7 @@ const state = {
 };
 
 const els = {
+  languageSelect: document.querySelector("#languageSelect"),
   batchMeta: document.querySelector("#batchMeta"),
   batchSelect: document.querySelector("#batchSelect"),
   importButton: document.querySelector("#importButton"),
@@ -43,6 +270,46 @@ const els = {
   dialogImage: document.querySelector("#dialogImage"),
   closeDialogButton: document.querySelector("#closeDialogButton"),
 };
+
+function t(key, values = {}) {
+  const template = translations[state.language]?.[key] ?? translations.en[key] ?? key;
+  return Object.entries(values).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value ?? "")),
+    template
+  );
+}
+
+function translatedStatus(status) {
+  return t(`status.${status}`);
+}
+
+function translatedFetchStatus(status) {
+  return t(`fetch.${status || "missing"}`);
+}
+
+function scoreLabel(scoreField) {
+  return t(`score.${scoreField.field}.label`);
+}
+
+function scoreHelp(scoreField) {
+  return t(`score.${scoreField.field}.help`);
+}
+
+function applyStaticTranslations() {
+  document.documentElement.lang = state.language === "zh" ? "zh-CN" : "en";
+  document.title = t("app.title");
+  els.languageSelect.value = state.language;
+
+  for (const element of document.querySelectorAll("[data-i18n]")) {
+    element.textContent = t(element.dataset.i18n);
+  }
+  for (const element of document.querySelectorAll("[data-i18n-placeholder]")) {
+    element.placeholder = t(element.dataset.i18nPlaceholder);
+  }
+  for (const element of document.querySelectorAll("[data-i18n-aria-label]")) {
+    element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
+  }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -94,7 +361,7 @@ function filteredItems() {
 
 function renderBatchSelect() {
   if (!state.batches.length) {
-    els.batchSelect.innerHTML = '<option value="">No batches</option>';
+    els.batchSelect.innerHTML = `<option value="">${escapeHtml(t("empty.noBatches"))}</option>`;
     return;
   }
 
@@ -117,7 +384,7 @@ function renderMetrics() {
 
   const batch = selectedBatch();
   if (!batch) {
-    els.batchMeta.textContent = "No batch loaded";
+    els.batchMeta.textContent = t("empty.noBatch");
     return;
   }
   const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
@@ -130,7 +397,7 @@ function renderFilters() {
     state.filters.model = "all";
   }
   els.modelFilter.innerHTML = [
-    '<option value="all">All models</option>',
+    `<option value="all">${escapeHtml(t("filters.allModels"))}</option>`,
     ...models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`),
   ].join("");
   els.modelFilter.value = state.filters.model;
@@ -138,10 +405,10 @@ function renderFilters() {
 
 function renderItemList() {
   const visible = filteredItems();
-  els.visibleCount.textContent = `${visible.length} visible`;
+  els.visibleCount.textContent = t("queue.visible", { count: visible.length });
 
   if (!visible.length) {
-    els.itemList.innerHTML = '<div class="empty-list">No matching items</div>';
+    els.itemList.innerHTML = `<div class="empty-list">${escapeHtml(t("queue.noMatching"))}</div>`;
     return;
   }
 
@@ -153,12 +420,12 @@ function renderItemList() {
         <button class="item-row ${item.id === state.selectedItemId ? "active" : ""}" data-id="${escapeHtml(item.id)}" type="button">
           <div class="row-title">
             <span class="model-pill">${escapeHtml(item.model)}</span>
-            <span class="status-pill ${reviewed ? "reviewed" : "unreviewed"}">${reviewed ? score : "Open"}</span>
+            <span class="status-pill ${reviewed ? "reviewed" : "unreviewed"}">${reviewed ? score : t("review.open")}</span>
           </div>
           <div class="row-prompt">${escapeHtml(item.text)}</div>
           <div class="row-title">
             <span>${escapeHtml(item.raw_json_file)} #${item.raw_index + 1}</span>
-            <span>${escapeHtml(item.source_fetch_status)}/${escapeHtml(item.result_fetch_status)}</span>
+            <span>${escapeHtml(translatedFetchStatus(item.source_fetch_status))}/${escapeHtml(translatedFetchStatus(item.result_fetch_status))}</span>
           </div>
         </button>
       `;
@@ -183,7 +450,7 @@ function imageHtml(item, kind) {
     return `
       <img
         src="${escapeHtml(path)}"
-        alt="${isSource ? "Source image" : "Result image"}"
+        alt="${escapeHtml(isSource ? t("image.sourceAlt") : t("image.resultAlt"))}"
         data-full="${escapeHtml(path)}"
         data-item-id="${escapeHtml(item.id)}"
         data-image-kind="${kind}"
@@ -191,8 +458,8 @@ function imageHtml(item, kind) {
     `;
   }
   return imageMissingHtml(item, kind, {
-    status: loadError ? "failed" : status,
-    error: loadError || error || "Image is not cached locally.",
+    status: translatedFetchStatus(loadError ? "failed" : status),
+    error: loadError || error || t("image.notCached"),
   });
 }
 
@@ -202,17 +469,17 @@ function imageMissingHtml(item, kind, details = {}) {
   const retrying = state.retryingImages.has(imageKey(item.id, kind));
   return `
     <div class="image-missing">
-      <strong>${escapeHtml(details.status || "missing")}</strong>
-      <p>${escapeHtml(details.error || "Image is not cached locally.")}</p>
+      <strong>${escapeHtml(details.status || translatedFetchStatus("missing"))}</strong>
+      <p>${escapeHtml(details.error || t("image.notCached"))}</p>
       <div class="image-missing-actions">
-        <a href="${escapeHtml(remote)}" target="_blank" rel="noreferrer">Open remote URL</a>
+        <a href="${escapeHtml(remote)}" target="_blank" rel="noreferrer">${escapeHtml(t("actions.openRemoteUrl"))}</a>
         <button
           class="retry-image-button secondary"
           type="button"
           data-item-id="${escapeHtml(item.id)}"
           data-retry-image-kind="${kind}"
           ${retrying ? "disabled" : ""}
-        >${retrying ? "Retrying..." : "Retry"}</button>
+        >${retrying ? t("actions.retrying") : t("actions.retry")}</button>
       </div>
     </div>
   `;
@@ -234,10 +501,10 @@ function renderImageCompare(item) {
     <div class="compare-shell">
       <div class="compare-tabs">
         <button class="compare-tab ${state.compareMode === "side-by-side" ? "active" : ""}" data-compare-mode="side-by-side" type="button">
-          Side by Side
+          ${escapeHtml(t("compare.sideBySide"))}
         </button>
         <button class="compare-tab ${state.compareMode === "overlay" ? "active" : ""}" data-compare-mode="overlay" type="button">
-          Overlay
+          ${escapeHtml(t("compare.overlay"))}
         </button>
       </div>
       <div id="imageCompareRegion">
@@ -251,11 +518,11 @@ function renderSideBySideImages(item) {
   return `
     <div class="image-grid">
       <div class="image-box">
-        <h3>Source Image</h3>
+        <h3>${escapeHtml(t("image.source"))}</h3>
         <div class="image-frame">${imageHtml(item, "source")}</div>
       </div>
       <div class="image-box">
-        <h3>Result Image</h3>
+        <h3>${escapeHtml(t("image.result"))}</h3>
         <div class="image-frame">${imageHtml(item, "result")}</div>
       </div>
     </div>
@@ -272,11 +539,11 @@ function renderOverlayImages(item) {
   if (!sourceReady || !resultReady) {
     return `
       <div class="overlay-unavailable">
-        <strong>Overlay unavailable</strong>
-        <p>Both cached source and result images must load before overlay comparison is available.</p>
+        <strong>${escapeHtml(t("overlay.unavailableTitle"))}</strong>
+        <p>${escapeHtml(t("overlay.unavailableBody"))}</p>
       </div>
-      ${!sourceReady ? imageMissingHtml(item, "source", { status: sourceLoadError ? "failed" : item.source_fetch_status, error: sourceLoadError || item.source_fetch_error }) : ""}
-      ${!resultReady ? imageMissingHtml(item, "result", { status: resultLoadError ? "failed" : item.result_fetch_status, error: resultLoadError || item.result_fetch_error }) : ""}
+      ${!sourceReady ? imageMissingHtml(item, "source", { status: translatedFetchStatus(sourceLoadError ? "failed" : item.source_fetch_status), error: sourceLoadError || item.source_fetch_error }) : ""}
+      ${!resultReady ? imageMissingHtml(item, "result", { status: translatedFetchStatus(resultLoadError ? "failed" : item.result_fetch_status), error: resultLoadError || item.result_fetch_error }) : ""}
     `;
   }
 
@@ -284,22 +551,22 @@ function renderOverlayImages(item) {
   const baseKind = topKind === "source" ? "result" : "source";
   const topSrc = topKind === "source" ? sourcePath : resultPath;
   const baseSrc = baseKind === "source" ? sourcePath : resultPath;
-  const topAlt = topKind === "source" ? "Source image overlay" : "Result image overlay";
-  const baseAlt = baseKind === "source" ? "Source image base" : "Result image base";
+  const topAlt = topKind === "source" ? t("overlay.sourceAlt") : t("overlay.resultAlt");
+  const baseAlt = baseKind === "source" ? t("overlay.sourceBaseAlt") : t("overlay.resultBaseAlt");
   const opacity = state.overlayOpacity / 100;
-  const swapLabel = topKind === "source" ? "Source over Result" : "Result over Source";
+  const swapLabel = topKind === "source" ? t("overlay.sourceOverResult") : t("overlay.resultOverSource");
 
   return `
     <div class="overlay-panel">
       <div class="overlay-tools">
         <label class="overlay-opacity-control">
-          <span>Opacity</span>
+          <span>${escapeHtml(t("overlay.opacity"))}</span>
           <input id="overlayOpacity" type="range" min="0" max="100" step="1" value="${state.overlayOpacity}" />
           <strong id="overlayOpacityValue">${state.overlayOpacity}%</strong>
         </label>
         <button id="overlaySwapButton" class="secondary" type="button">${swapLabel}</button>
         <button id="overlayBlinkButton" class="secondary ${state.overlayBlink ? "active" : ""}" type="button">
-          Blink ${state.overlayBlink ? "On" : "Off"}
+          ${escapeHtml(state.overlayBlink ? t("overlay.blinkOn") : t("overlay.blinkOff"))}
         </button>
       </div>
       <div class="overlay-stage ${state.overlayBlink ? "blinking" : ""}" style="--overlay-opacity:${opacity}">
@@ -331,15 +598,15 @@ function renderOverlayImages(item) {
 function overlayMetaText(item) {
   const sizes = state.imageSizes[item.id];
   if (!sizes?.source || !sizes?.result) {
-    return "Image size unavailable";
+    return t("overlay.sizeUnavailable");
   }
   const source = `${sizes.source.width} x ${sizes.source.height}`;
   const result = `${sizes.result.width} x ${sizes.result.height}`;
   const aligned =
     sizes.source.width === sizes.result.width && sizes.source.height === sizes.result.height
-      ? "Pixel-aligned"
-      : "Aspect-fit only, not pixel-perfect";
-  return `Source: ${source} | Result: ${result} | ${aligned}`;
+      ? t("overlay.pixelAligned")
+      : t("overlay.aspectFitOnly");
+  return t("overlay.meta", { source, result, aligned });
 }
 
 function loadImageSize(src) {
@@ -408,8 +675,8 @@ function renderReviewPane() {
     els.reviewPane.innerHTML = `
       <div class="empty-state">
         <div>
-          <h2>No item selected</h2>
-          <p>Select a row from the queue.</p>
+          <h2>${escapeHtml(t("review.noItemTitle"))}</h2>
+          <p>${escapeHtml(t("review.noItemBody"))}</p>
         </div>
       </div>
     `;
@@ -429,7 +696,7 @@ function renderReviewPane() {
         <div class="review-head">
           <div>
             <h2>${escapeHtml(item.model)}</h2>
-            <p>${escapeHtml(item.raw_json_file)} | item ${item.raw_index + 1} | ${escapeHtml(item.id)}</p>
+            <p>${escapeHtml(t("review.itemMeta", { file: item.raw_json_file, index: item.raw_index + 1, id: item.id }))}</p>
           </div>
         </div>
 
@@ -437,11 +704,11 @@ function renderReviewPane() {
 
         <div class="prompt-grid">
           <div class="prompt-box">
-            <h3>Original Prompt</h3>
+            <h3>${escapeHtml(t("review.originalPrompt"))}</h3>
             <pre>${escapeHtml(item.text)}</pre>
           </div>
           <div class="prompt-box">
-            <h3>Optimized Prompt</h3>
+            <h3>${escapeHtml(t("review.optimizedPrompt"))}</h3>
             <pre>${escapeHtml(item.optimization_prompt)}</pre>
           </div>
         </div>
@@ -451,25 +718,25 @@ function renderReviewPane() {
         <div class="evaluation-sticky">
           <div class="evaluation-summary">
             <div>
-              <span>Evaluation</span>
-              <strong>${item.evaluation_updated_at ? "Reviewed" : "Open"}</strong>
+              <span>${escapeHtml(t("review.evaluation"))}</span>
+              <strong>${item.evaluation_updated_at ? t("review.reviewed") : t("review.open")}</strong>
             </div>
             <div class="score-badge">
-              <span>Overall</span>
+              <span>${escapeHtml(t("review.overall"))}</span>
               <strong id="overallScore">${overall}</strong>
             </div>
           </div>
 
           <div class="score-grid">
             <div class="score-box">
-              <h3>Core Scores</h3>
+              <h3>${escapeHtml(t("review.coreScores"))}</h3>
               ${scoreFields
                 .slice(0, 3)
                 .map((field) => scoreRow(field, form[field.field]))
                 .join("")}
             </div>
             <div class="score-box">
-              <h3>Quality Scores</h3>
+              <h3>${escapeHtml(t("review.qualityScores"))}</h3>
               ${scoreFields
                 .slice(3)
                 .map((field) => scoreRow(field, form[field.field]))
@@ -479,26 +746,26 @@ function renderReviewPane() {
 
           <div class="review-controls">
             <div class="comment-box">
-              <h3>Status</h3>
+              <h3>${escapeHtml(t("review.status"))}</h3>
               <div class="tag-grid">
                 <select id="statusSelect" name="status">
                   ${statusOptions
                     .map(
                       (status) =>
-                        `<option value="${status}" ${selectedStatus === status ? "selected" : ""}>${status}</option>`
+                        `<option value="${status}" ${selectedStatus === status ? "selected" : ""}>${translatedStatus(status)}</option>`
                     )
                     .join("")}
                 </select>
               </div>
             </div>
             <div class="comment-box">
-              <h3>Comment</h3>
-              <textarea id="commentInput" name="comment" placeholder="Reviewer notes">${escapeHtml(comment)}</textarea>
+              <h3>${escapeHtml(t("review.comment"))}</h3>
+              <textarea id="commentInput" name="comment" placeholder="${escapeHtml(t("review.commentPlaceholder"))}">${escapeHtml(comment)}</textarea>
             </div>
           </div>
 
           <div class="comment-box tag-box">
-            <h3>Tags</h3>
+            <h3>${escapeHtml(t("review.tags"))}</h3>
             <div class="tag-grid">
               ${tagOptions
                 .map(
@@ -513,8 +780,8 @@ function renderReviewPane() {
           </div>
 
           <div class="save-row">
-            <span class="save-note" id="saveNote">${item.evaluation_updated_at ? `Saved ${escapeHtml(new Date(item.evaluation_updated_at).toLocaleString())}` : "Not reviewed"}</span>
-            <button id="saveButton" type="submit">Save Review</button>
+            <span class="save-note" id="saveNote">${item.evaluation_updated_at ? escapeHtml(t("review.savedAt", { time: new Date(item.evaluation_updated_at).toLocaleString() })) : escapeHtml(t("review.notReviewed"))}</span>
+            <button id="saveButton" type="submit">${escapeHtml(t("actions.saveReview"))}</button>
           </div>
         </div>
       </form>
@@ -570,7 +837,7 @@ function renderReviewPane() {
       const kind = img.dataset.imageKind;
       if (!itemId || !kind) return;
       captureReviewDraft(itemId);
-      state.imageLoadFailures[imageKey(itemId, kind)] = "Cached image failed to load locally.";
+      state.imageLoadFailures[imageKey(itemId, kind)] = t("image.localLoadFailed");
       render();
     });
   }
@@ -617,8 +884,8 @@ function scoreRow(scoreField, value) {
   return `
     <div class="score-row">
       <label for="${scoreField.field}">
-        ${scoreField.label}
-        <small>Weight ${scoreField.weightLabel}. ${scoreField.help}</small>
+        ${escapeHtml(scoreLabel(scoreField))}
+        <small>${escapeHtml(t("score.weight", { weight: scoreField.weightLabel, help: scoreHelp(scoreField) }))}</small>
       </label>
       <input id="${scoreField.field}" name="${scoreField.field}" type="range" min="1" max="5" step="1" value="${value}" />
       <span class="score-value" data-score-value="${scoreField.field}">${value}</span>
@@ -629,7 +896,7 @@ function scoreRow(scoreField, value) {
 function renderStats() {
   const byModel = state.stats?.by_model || [];
   if (!byModel.length) {
-    els.modelStats.innerHTML = '<p class="muted">No reviewed models yet.</p>';
+    els.modelStats.innerHTML = `<p class="muted">${escapeHtml(t("stats.noReviewedModels"))}</p>`;
   } else {
     els.modelStats.innerHTML = byModel
       .map((row) => {
@@ -642,7 +909,7 @@ function renderStats() {
               <strong>${row.avg_overall_score ?? "--"}</strong>
             </header>
             <div class="bar"><span style="width:${percent}%"></span></div>
-            <small>${row.reviewed_items || 0}/${row.total_items || 0} reviewed</small>
+            <small>${escapeHtml(t("stats.reviewedCount", { reviewed: row.reviewed_items || 0, total: row.total_items || 0 }))}</small>
             <small>
               ${scoreFields
                 .map(({ shortLabel, field }) => {
@@ -659,7 +926,7 @@ function renderStats() {
 
   const tagCounts = state.stats?.tag_counts || [];
   if (!tagCounts.length) {
-    els.tagStats.innerHTML = '<p class="muted">No tags yet.</p>';
+    els.tagStats.innerHTML = `<p class="muted">${escapeHtml(t("stats.noTags"))}</p>`;
   } else {
     els.tagStats.innerHTML = tagCounts
       .map(
@@ -686,12 +953,12 @@ async function saveEvaluation(itemId, formEl, tags) {
     tags,
   };
   const saveNote = document.querySelector("#saveNote");
-  saveNote.textContent = "Saving...";
+  saveNote.textContent = t("review.saving");
   await api(`/api/items/${itemId}/evaluation`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  saveNote.textContent = "Saved";
+  saveNote.textContent = t("review.saved");
   delete state.reviewDrafts[itemId];
   await loadBatch(state.selectedBatchId, itemId);
 }
@@ -710,7 +977,7 @@ async function retryImage(itemId, kind) {
       delete state.imageLoadFailures[key];
       delete state.imageSizes[itemId];
     } else {
-      state.imageLoadFailures[key] = body.retry?.fetchError || "Image retry failed.";
+      state.imageLoadFailures[key] = body.retry?.fetchError || t("image.retryFailed");
     }
     await loadBatch(state.selectedBatchId, itemId);
   } finally {
@@ -765,6 +1032,7 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
 }
 
 function render() {
+  applyStaticTranslations();
   renderBatchSelect();
   renderMetrics();
   renderFilters();
@@ -775,7 +1043,7 @@ function render() {
 
 async function importBatch() {
   els.importButton.disabled = true;
-  els.importButton.textContent = "Importing...";
+  els.importButton.textContent = t("actions.importing");
   try {
     const body = await api("/api/import", {
       method: "POST",
@@ -785,7 +1053,7 @@ async function importBatch() {
     await loadBatch(body.batch.id);
   } finally {
     els.importButton.disabled = false;
-    els.importButton.textContent = "Import Resource";
+    els.importButton.textContent = t("actions.importResource");
   }
 }
 
@@ -821,6 +1089,13 @@ els.batchSelect.addEventListener("change", () => {
   loadBatch(els.batchSelect.value, "", { resetFilters: true }).catch(showFatalError);
 });
 
+els.languageSelect.addEventListener("change", () => {
+  captureReviewDraft(state.selectedItemId);
+  state.language = els.languageSelect.value;
+  localStorage.setItem("skill-eval-language", state.language);
+  render();
+});
+
 els.importButton.addEventListener("click", () => {
   importBatch().catch((error) => {
     alert(error.message);
@@ -852,7 +1127,7 @@ function showFatalError(error) {
   els.reviewPane.innerHTML = `
     <div class="empty-state">
       <div>
-        <h2>Unable to load</h2>
+        <h2>${escapeHtml(t("error.unableTitle"))}</h2>
         <p>${escapeHtml(error.message)}</p>
       </div>
     </div>
