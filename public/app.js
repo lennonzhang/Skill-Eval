@@ -11,6 +11,9 @@ const state = {
   overlayTop: "source",
   overlayBlink: false,
   imageSizes: {},
+  imageLoadFailures: {},
+  retryingImages: new Set(),
+  reviewDrafts: {},
   filters: {
     model: "all",
     status: "all",
@@ -118,7 +121,7 @@ function renderMetrics() {
     return;
   }
   const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
-  els.batchMeta.textContent = `${batch.id} · ${imported}`;
+  els.batchMeta.textContent = `${batch.id} | ${imported}`;
 }
 
 function renderFilters() {
@@ -173,19 +176,50 @@ function renderItemList() {
 function imageHtml(item, kind) {
   const isSource = kind === "source";
   const path = isSource ? item.source_image_url : item.result_image_url;
-  const remote = isSource ? item.url : item.result_url;
   const status = isSource ? item.source_fetch_status : item.result_fetch_status;
   const error = isSource ? item.source_fetch_error : item.result_fetch_error;
-  if (path) {
-    return `<img src="${escapeHtml(path)}" alt="${isSource ? "Source image" : "Result image"}" data-full="${escapeHtml(path)}" />`;
+  const loadError = state.imageLoadFailures[imageKey(item.id, kind)];
+  if (path && status === "success" && !loadError) {
+    return `
+      <img
+        src="${escapeHtml(path)}"
+        alt="${isSource ? "Source image" : "Result image"}"
+        data-full="${escapeHtml(path)}"
+        data-item-id="${escapeHtml(item.id)}"
+        data-image-kind="${kind}"
+      />
+    `;
   }
+  return imageMissingHtml(item, kind, {
+    status: loadError ? "failed" : status,
+    error: loadError || error || "Image is not cached locally.",
+  });
+}
+
+function imageMissingHtml(item, kind, details = {}) {
+  const isSource = kind === "source";
+  const remote = isSource ? item.url : item.result_url;
+  const retrying = state.retryingImages.has(imageKey(item.id, kind));
   return `
     <div class="image-missing">
-      <strong>${escapeHtml(status || "missing")}</strong>
-      <p>${escapeHtml(error || "Image is not cached locally.")}</p>
-      <a href="${escapeHtml(remote)}" target="_blank" rel="noreferrer">Open remote URL</a>
+      <strong>${escapeHtml(details.status || "missing")}</strong>
+      <p>${escapeHtml(details.error || "Image is not cached locally.")}</p>
+      <div class="image-missing-actions">
+        <a href="${escapeHtml(remote)}" target="_blank" rel="noreferrer">Open remote URL</a>
+        <button
+          class="retry-image-button secondary"
+          type="button"
+          data-item-id="${escapeHtml(item.id)}"
+          data-retry-image-kind="${kind}"
+          ${retrying ? "disabled" : ""}
+        >${retrying ? "Retrying..." : "Retry"}</button>
+      </div>
     </div>
   `;
+}
+
+function imageKey(itemId, kind) {
+  return `${itemId}:${kind}`;
 }
 
 function resetOverlayState() {
@@ -231,12 +265,18 @@ function renderSideBySideImages(item) {
 function renderOverlayImages(item) {
   const sourcePath = item.source_image_url;
   const resultPath = item.result_image_url;
-  if (!sourcePath || !resultPath) {
+  const sourceLoadError = state.imageLoadFailures[imageKey(item.id, "source")];
+  const resultLoadError = state.imageLoadFailures[imageKey(item.id, "result")];
+  const sourceReady = sourcePath && item.source_fetch_status === "success" && !sourceLoadError;
+  const resultReady = resultPath && item.result_fetch_status === "success" && !resultLoadError;
+  if (!sourceReady || !resultReady) {
     return `
       <div class="overlay-unavailable">
         <strong>Overlay unavailable</strong>
-        <p>Both cached source and result images are required for overlay comparison.</p>
+        <p>Both cached source and result images must load before overlay comparison is available.</p>
       </div>
+      ${!sourceReady ? imageMissingHtml(item, "source", { status: sourceLoadError ? "failed" : item.source_fetch_status, error: sourceLoadError || item.source_fetch_error }) : ""}
+      ${!resultReady ? imageMissingHtml(item, "result", { status: resultLoadError ? "failed" : item.result_fetch_status, error: resultLoadError || item.result_fetch_error }) : ""}
     `;
   }
 
@@ -263,8 +303,25 @@ function renderOverlayImages(item) {
         </button>
       </div>
       <div class="overlay-stage ${state.overlayBlink ? "blinking" : ""}" style="--overlay-opacity:${opacity}">
-        <img class="overlay-img base" src="${escapeHtml(baseSrc)}" alt="${escapeHtml(baseAlt)}" data-full="${escapeHtml(baseSrc)}" data-size-kind="${baseKind}" />
-        <img class="overlay-img top" src="${escapeHtml(topSrc)}" alt="${escapeHtml(topAlt)}" data-full="${escapeHtml(topSrc)}" data-size-kind="${topKind}" style="opacity:${opacity}" />
+        <img
+          class="overlay-img base"
+          src="${escapeHtml(baseSrc)}"
+          alt="${escapeHtml(baseAlt)}"
+          data-full="${escapeHtml(baseSrc)}"
+          data-size-kind="${baseKind}"
+          data-item-id="${escapeHtml(item.id)}"
+          data-image-kind="${baseKind}"
+        />
+        <img
+          class="overlay-img top"
+          src="${escapeHtml(topSrc)}"
+          alt="${escapeHtml(topAlt)}"
+          data-full="${escapeHtml(topSrc)}"
+          data-size-kind="${topKind}"
+          data-item-id="${escapeHtml(item.id)}"
+          data-image-kind="${topKind}"
+          style="opacity:${opacity}"
+        />
       </div>
       <div class="overlay-meta" id="overlayMeta">${escapeHtml(overlayMetaText(item))}</div>
     </div>
@@ -282,7 +339,7 @@ function overlayMetaText(item) {
     sizes.source.width === sizes.result.width && sizes.source.height === sizes.result.height
       ? "Pixel-aligned"
       : "Aspect-fit only, not pixel-perfect";
-  return `Source: ${source} · Result: ${result} · ${aligned}`;
+  return `Source: ${source} | Result: ${result} | ${aligned}`;
 }
 
 function loadImageSize(src) {
@@ -295,7 +352,15 @@ function loadImageSize(src) {
 }
 
 async function ensureImageSizes(item) {
-  if (!item.source_image_url || !item.result_image_url || state.imageSizes[item.id]) return;
+  if (
+    !item.source_image_url ||
+    !item.result_image_url ||
+    state.imageSizes[item.id] ||
+    state.imageLoadFailures[imageKey(item.id, "source")] ||
+    state.imageLoadFailures[imageKey(item.id, "result")]
+  ) {
+    return;
+  }
   try {
     const [source, result] = await Promise.all([
       loadImageSize(item.source_image_url),
@@ -311,8 +376,34 @@ async function ensureImageSizes(item) {
   }
 }
 
+function selectedItem() {
+  return state.items.find((candidate) => candidate.id === state.selectedItemId);
+}
+
+function captureReviewDraft(itemId) {
+  const formEl = document.querySelector("#evaluationForm");
+  if (!formEl || !itemId) return;
+  state.reviewDrafts[itemId] = {
+    ...readScoreForm(formEl),
+    status: formEl.elements.status.value,
+    comment: formEl.elements.comment.value,
+    tags: [...formEl.querySelectorAll(".tag-button.selected")].map((button) => button.dataset.tag),
+  };
+}
+
+function draftForItem(item) {
+  return state.reviewDrafts[item.id];
+}
+
+function scoreFormForItem(item) {
+  const draft = draftForItem(item);
+  return Object.fromEntries(
+    scoreFields.map(({ field }) => [field, draft?.[field] !== undefined ? Number(draft[field]) : scoreValue(item, field)])
+  );
+}
+
 function renderReviewPane() {
-  const item = state.items.find((candidate) => candidate.id === state.selectedItemId);
+  const item = selectedItem();
   if (!item) {
     els.reviewPane.innerHTML = `
       <div class="empty-state">
@@ -325,93 +416,109 @@ function renderReviewPane() {
     return;
   }
 
-  const form = Object.fromEntries(scoreFields.map(({ field }) => [field, scoreValue(item, field)]));
+  const draft = draftForItem(item);
+  const form = scoreFormForItem(item);
   const overall = item.overall_score ? Number(item.overall_score).toFixed(2) : calculateOverall(form);
-  const selectedTags = Array.isArray(item.tags) ? item.tags : [];
+  const selectedTags = Array.isArray(draft?.tags) ? draft.tags : Array.isArray(item.tags) ? item.tags : [];
+  const selectedStatus = draft?.status || item.status;
+  const comment = draft?.comment ?? item.comment ?? "";
 
   els.reviewPane.innerHTML = `
-    <div class="review-head">
-      <div>
-        <h2>${escapeHtml(item.model)}</h2>
-        <p>${escapeHtml(item.raw_json_file)} · item ${item.raw_index + 1} · ${escapeHtml(item.id)}</p>
-      </div>
-      <div class="score-badge">
-        <span>Overall</span>
-        <strong id="overallScore">${overall}</strong>
-      </div>
-    </div>
-
-    ${renderImageCompare(item)}
-
-    <div class="prompt-grid">
-      <div class="prompt-box">
-        <h3>Original Prompt</h3>
-        <pre>${escapeHtml(item.text)}</pre>
-      </div>
-      <div class="prompt-box">
-        <h3>Optimized Prompt</h3>
-        <pre>${escapeHtml(item.optimization_prompt)}</pre>
-      </div>
-    </div>
-
-    <form id="evaluationForm">
-      <div class="score-grid">
-        <div class="score-box">
-          <h3>Core Scores</h3>
-          ${scoreFields
-            .slice(0, 3)
-            .map((field) => scoreRow(field, form[field.field]))
-            .join("")}
-        </div>
-        <div class="score-box">
-          <h3>Quality Scores</h3>
-          ${scoreFields
-            .slice(3)
-            .map((field) => scoreRow(field, form[field.field]))
-            .join("")}
-        </div>
-      </div>
-
-      <div class="review-controls">
-        <div class="comment-box">
-          <h3>Status</h3>
-          <div class="tag-grid">
-            <select id="statusSelect" name="status">
-              ${statusOptions
-                .map(
-                  (status) =>
-                    `<option value="${status}" ${item.status === status ? "selected" : ""}>${status}</option>`
-                )
-                .join("")}
-            </select>
+    <div class="review-layout">
+      <section class="review-main">
+        <div class="review-head">
+          <div>
+            <h2>${escapeHtml(item.model)}</h2>
+            <p>${escapeHtml(item.raw_json_file)} | item ${item.raw_index + 1} | ${escapeHtml(item.id)}</p>
           </div>
         </div>
-        <div class="comment-box">
-          <h3>Comment</h3>
-          <textarea id="commentInput" name="comment" placeholder="Reviewer notes">${escapeHtml(item.comment || "")}</textarea>
-        </div>
-      </div>
 
-      <div class="comment-box" style="margin-top:12px">
-        <h3>Tags</h3>
-        <div class="tag-grid">
-          ${tagOptions
-            .map(
-              (tag) => `
-                <button class="tag-button ${selectedTags.includes(tag) ? "selected" : ""}" data-tag="${tag}" type="button">
-                  ${tag}
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
+        ${renderImageCompare(item)}
 
-      <div class="save-row">
-        <span class="save-note" id="saveNote">${item.evaluation_updated_at ? `Saved ${escapeHtml(new Date(item.evaluation_updated_at).toLocaleString())}` : "Not reviewed"}</span>
-        <button id="saveButton" type="submit">Save Review</button>
-      </div>
-    </form>
+        <div class="prompt-grid">
+          <div class="prompt-box">
+            <h3>Original Prompt</h3>
+            <pre>${escapeHtml(item.text)}</pre>
+          </div>
+          <div class="prompt-box">
+            <h3>Optimized Prompt</h3>
+            <pre>${escapeHtml(item.optimization_prompt)}</pre>
+          </div>
+        </div>
+      </section>
+
+      <form id="evaluationForm" class="evaluation-sidebar">
+        <div class="evaluation-sticky">
+          <div class="evaluation-summary">
+            <div>
+              <span>Evaluation</span>
+              <strong>${item.evaluation_updated_at ? "Reviewed" : "Open"}</strong>
+            </div>
+            <div class="score-badge">
+              <span>Overall</span>
+              <strong id="overallScore">${overall}</strong>
+            </div>
+          </div>
+
+          <div class="score-grid">
+            <div class="score-box">
+              <h3>Core Scores</h3>
+              ${scoreFields
+                .slice(0, 3)
+                .map((field) => scoreRow(field, form[field.field]))
+                .join("")}
+            </div>
+            <div class="score-box">
+              <h3>Quality Scores</h3>
+              ${scoreFields
+                .slice(3)
+                .map((field) => scoreRow(field, form[field.field]))
+                .join("")}
+            </div>
+          </div>
+
+          <div class="review-controls">
+            <div class="comment-box">
+              <h3>Status</h3>
+              <div class="tag-grid">
+                <select id="statusSelect" name="status">
+                  ${statusOptions
+                    .map(
+                      (status) =>
+                        `<option value="${status}" ${selectedStatus === status ? "selected" : ""}>${status}</option>`
+                    )
+                    .join("")}
+                </select>
+              </div>
+            </div>
+            <div class="comment-box">
+              <h3>Comment</h3>
+              <textarea id="commentInput" name="comment" placeholder="Reviewer notes">${escapeHtml(comment)}</textarea>
+            </div>
+          </div>
+
+          <div class="comment-box tag-box">
+            <h3>Tags</h3>
+            <div class="tag-grid">
+              ${tagOptions
+                .map(
+                  (tag) => `
+                    <button class="tag-button ${selectedTags.includes(tag) ? "selected" : ""}" data-tag="${tag}" type="button">
+                      ${tag}
+                    </button>
+                  `
+                )
+                .join("")}
+            </div>
+          </div>
+
+          <div class="save-row">
+            <span class="save-note" id="saveNote">${item.evaluation_updated_at ? `Saved ${escapeHtml(new Date(item.evaluation_updated_at).toLocaleString())}` : "Not reviewed"}</span>
+            <button id="saveButton" type="submit">Save Review</button>
+          </div>
+        </div>
+      </form>
+    </div>
   `;
 
   const formEl = document.querySelector("#evaluationForm");
@@ -458,6 +565,26 @@ function renderReviewPane() {
 
   for (const img of els.reviewPane.querySelectorAll("img[data-full]")) {
     img.addEventListener("click", () => openImage(img.dataset.full, img.alt));
+    img.addEventListener("error", () => {
+      const itemId = img.dataset.itemId;
+      const kind = img.dataset.imageKind;
+      if (!itemId || !kind) return;
+      captureReviewDraft(itemId);
+      state.imageLoadFailures[imageKey(itemId, kind)] = "Cached image failed to load locally.";
+      render();
+    });
+  }
+
+  for (const button of els.reviewPane.querySelectorAll("[data-retry-image-kind]")) {
+    button.addEventListener("click", () => {
+      const itemId = button.dataset.itemId;
+      const kind = button.dataset.retryImageKind;
+      if (!itemId || !kind) return;
+      retryImage(itemId, kind).catch((error) => {
+        state.imageLoadFailures[imageKey(itemId, kind)] = error.message;
+        render();
+      });
+    });
   }
 
   for (const input of formEl.querySelectorAll('input[type="range"]')) {
@@ -522,7 +649,7 @@ function renderStats() {
                   const statKey = `avg_${field}`;
                   return `${shortLabel} ${row[statKey] ?? "--"}`;
                 })
-                .join(" · ")}
+                .join(" | ")}
             </small>
           </div>
         `;
@@ -565,7 +692,31 @@ async function saveEvaluation(itemId, formEl, tags) {
     body: JSON.stringify(payload),
   });
   saveNote.textContent = "Saved";
+  delete state.reviewDrafts[itemId];
   await loadBatch(state.selectedBatchId, itemId);
+}
+
+async function retryImage(itemId, kind) {
+  captureReviewDraft(itemId);
+  const key = imageKey(itemId, kind);
+  state.retryingImages.add(key);
+  render();
+  try {
+    const body = await api(`/api/items/${itemId}/images/${kind}/retry`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (body.retry?.fetchStatus === "success") {
+      delete state.imageLoadFailures[key];
+      delete state.imageSizes[itemId];
+    } else {
+      state.imageLoadFailures[key] = body.retry?.fetchError || "Image retry failed.";
+    }
+    await loadBatch(state.selectedBatchId, itemId);
+  } finally {
+    state.retryingImages.delete(key);
+    render();
+  }
 }
 
 async function loadBatches() {

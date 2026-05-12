@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
-import { getBatchStats, getBatches, getDatabase, getItemsForBatch, saveEvaluation } from "../src/db.js";
+import {
+  createBatch,
+  getBatchStats,
+  getBatches,
+  getDatabase,
+  getItemsForBatch,
+  insertItem,
+  saveEvaluation,
+  updateBatchCounts,
+  updateSingleImageCacheStatus,
+} from "../src/db.js";
 import { calculateOverallScore, EvaluationValidationError, validateEvaluationInput } from "../public/scoring.js";
 
 const db = getDatabase();
@@ -91,6 +102,90 @@ assert.throws(
 const after = getBatchStats(batch.id).summary.reviewed_items;
 assert.equal(after, before);
 
+const retryBatchId = `selftest-retry-${randomUUID()}`;
+const retryItemId = `selftest-item-${randomUUID()}`;
+
+db.exec("BEGIN");
+try {
+  createBatch({
+    id: retryBatchId,
+    name: "Selftest retry batch",
+    sourceDir: "selftest",
+    importedAt: new Date().toISOString(),
+  });
+  insertItem({
+    id: retryItemId,
+    batchId: retryBatchId,
+    rawJsonFile: "selftest.json",
+    rawIndex: 0,
+    model: "selftest-model",
+    text: "selftest source prompt",
+    url: "https://example.test/source.png",
+    resultUrl: "https://example.test/result.png",
+    optimizationPrompt: "selftest optimized prompt",
+    sourceImagePath: null,
+    resultImagePath: "data/cache/selftest/result.png",
+    sourceFetchStatus: "failed",
+    resultFetchStatus: "success",
+    sourceFetchError: "initial source failure",
+    resultFetchError: null,
+    importKey: randomUUID(),
+    createdAt: new Date().toISOString(),
+  });
+
+  updateBatchCounts(retryBatchId);
+  let retryStats = getBatchStats(retryBatchId).summary;
+  assert.equal(retryStats.cached_source_images, 0);
+  assert.equal(retryStats.cached_result_images, 1);
+
+  updateSingleImageCacheStatus(retryItemId, "source", {
+    imagePath: "data/cache/selftest/source.png",
+    fetchStatus: "success",
+    fetchError: null,
+  });
+  updateBatchCounts(retryBatchId);
+
+  let retryItem = getItemsForBatch(retryBatchId)[0];
+  assert.equal(retryItem.source_fetch_status, "success");
+  assert.equal(retryItem.source_fetch_error, null);
+  assert.equal(retryItem.source_image_url, "/data/cache/selftest/source.png");
+  assert.equal(retryItem.result_fetch_status, "success");
+  assert.equal(retryItem.result_image_path, "data/cache/selftest/result.png");
+
+  retryStats = getBatchStats(retryBatchId).summary;
+  assert.equal(retryStats.cached_source_images, 1);
+  assert.equal(retryStats.cached_result_images, 1);
+
+  updateSingleImageCacheStatus(retryItemId, "result", {
+    imagePath: retryItem.result_image_path,
+    fetchStatus: "failed",
+    fetchError: "retry result failure",
+  });
+  updateBatchCounts(retryBatchId);
+
+  retryItem = getItemsForBatch(retryBatchId)[0];
+  assert.equal(retryItem.source_fetch_status, "success");
+  assert.equal(retryItem.source_image_path, "data/cache/selftest/source.png");
+  assert.equal(retryItem.result_fetch_status, "failed");
+  assert.equal(retryItem.result_image_path, "data/cache/selftest/result.png");
+  assert.equal(retryItem.result_fetch_error, "retry result failure");
+
+  retryStats = getBatchStats(retryBatchId).summary;
+  assert.equal(retryStats.cached_source_images, 1);
+  assert.equal(retryStats.cached_result_images, 0);
+  assert.throws(
+    () =>
+      updateSingleImageCacheStatus(retryItemId, "thumbnail", {
+        imagePath: null,
+        fetchStatus: "failed",
+        fetchError: "bad kind",
+      }),
+    /Invalid image kind/
+  );
+} finally {
+  db.exec("ROLLBACK");
+}
+
 console.log(
   JSON.stringify(
     {
@@ -99,6 +194,7 @@ console.log(
       item: item.id,
       reviewedBefore: before,
       reviewedAfterRollback: after,
+      retryCacheUpdate: "passed",
     },
     null,
     2

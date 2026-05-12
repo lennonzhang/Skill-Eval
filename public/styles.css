@@ -284,6 +284,55 @@ button.secondary:hover {
   padding: 16px;
 }
 
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) 380px;
+  gap: 14px;
+  align-items: start;
+}
+
+.review-main {
+  min-width: 0;
+}
+
+.evaluation-sidebar {
+  min-width: 0;
+}
+
+.evaluation-sticky {
+  position: sticky;
+  top: 12px;
+  display: grid;
+  gap: 12px;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.evaluation-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.evaluation-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.evaluation-summary strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 15px;
+}
+
 .empty-state {
   display: grid;
   place-items: center;
@@ -302,7 +351,7 @@ button.secondary:hover {
   justify-content: space-between;
   gap: 12px;
   align-items: start;
-  margin-bottom: 14px;
+  margin-bottom: 0;
 }
 
 .review-head h2 {
@@ -338,12 +387,16 @@ button.secondary:hover {
 }
 
 .prompt-grid,
-.image-grid,
-.score-grid {
+.image-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-top: 12px;
+}
+
+.score-grid {
+  display: grid;
+  gap: 12px;
 }
 
 .compare-shell {
@@ -399,7 +452,7 @@ button.secondary:hover {
 .prompt-box pre {
   margin: 0;
   padding: 12px;
-  max-height: 230px;
+  max-height: 176px;
   overflow: auto;
   white-space: pre-wrap;
   color: var(--ink);
@@ -411,7 +464,7 @@ button.secondary:hover {
 .image-frame {
   display: grid;
   place-items: center;
-  min-height: 280px;
+  min-height: 250px;
   padding: 10px;
   background:
     linear-gradient(45deg, #e8e4da 25%, transparent 25%),
@@ -429,7 +482,7 @@ button.secondary:hover {
 
 .image-frame img {
   max-width: 100%;
-  max-height: 420px;
+  max-height: 360px;
   object-fit: contain;
   cursor: zoom-in;
 }
@@ -439,6 +492,42 @@ button.secondary:hover {
   color: var(--bad);
   text-align: center;
   font-size: 13px;
+}
+
+.image-missing strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.image-missing p {
+  margin: 0 auto 12px;
+  max-width: 360px;
+  line-height: 1.4;
+}
+
+.image-missing-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  align-items: center;
+}
+
+.image-missing-actions a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  color: var(--bad);
+}
+
+.retry-image-button {
+  min-height: 34px;
+}
+
+.retry-image-button:disabled {
+  cursor: progress;
+  opacity: 0.68;
+  transform: none;
 }
 
 .overlay-panel,
@@ -500,8 +589,8 @@ button.secondary:hover {
   display: grid;
   place-items: center;
   width: 100%;
-  min-height: 520px;
-  max-height: 72vh;
+  min-height: 460px;
+  max-height: calc(100vh - 318px);
   aspect-ratio: 1 / 1;
   overflow: hidden;
   background:
@@ -560,8 +649,8 @@ button.secondary:hover {
 
 .score-row {
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) 160px 42px;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 124px 30px;
+  gap: 8px;
   align-items: center;
   padding: 10px 12px 0;
 }
@@ -574,7 +663,8 @@ button.secondary:hover {
   display: block;
   margin-top: 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .score-row input[type="range"] {
@@ -590,19 +680,22 @@ button.secondary:hover {
 
 .review-controls {
   display: grid;
-  grid-template-columns: 190px 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
-  margin-top: 12px;
 }
 
 .comment-box textarea {
   display: block;
   width: 100%;
-  min-height: 116px;
+  min-height: 88px;
   padding: 12px;
   border: 0;
   resize: vertical;
   background: transparent;
+}
+
+.tag-box {
+  margin-top: 0;
 }
 
 .tag-grid {
@@ -632,7 +725,7 @@ button.secondary:hover {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  margin-top: 12px;
+  padding-bottom: 2px;
 }
 
 .save-row select {
@@ -733,6 +826,18 @@ button.secondary:hover {
   border-color: white;
 }
 
+@media (max-width: 1680px) {
+  .workspace {
+    grid-template-columns: 300px minmax(720px, 1fr);
+  }
+
+  .stats-panel {
+    position: static;
+    grid-column: 1 / -1;
+    max-height: none;
+  }
+}
+
 @media (max-width: 1250px) {
   body {
     min-width: 980px;
@@ -742,9 +847,20 @@ button.secondary:hover {
     grid-template-columns: 280px minmax(520px, 1fr);
   }
 
-  .stats-panel {
+  .review-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .evaluation-sticky {
     position: static;
-    grid-column: 1 / -1;
     max-height: none;
+  }
+
+  .score-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .review-controls {
+    grid-template-columns: 190px 1fr;
   }
 }

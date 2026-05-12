@@ -259,8 +259,29 @@ export function getItemsForBatch(batchId) {
     }));
 }
 
+export function getItemById(itemId) {
+  return getDatabase().prepare("SELECT * FROM items WHERE id = ?").get(itemId);
+}
+
 export function itemExists(itemId) {
   return Boolean(getDatabase().prepare("SELECT 1 FROM items WHERE id = ?").get(itemId));
+}
+
+export function updateSingleImageCacheStatus(itemId, kind, patch) {
+  if (!["source", "result"].includes(kind)) {
+    throw new Error(`Invalid image kind: ${kind}`);
+  }
+
+  const columnPrefix = kind === "source" ? "source" : "result";
+  getDatabase()
+    .prepare(
+      `UPDATE items
+       SET ${columnPrefix}_image_path = ?,
+           ${columnPrefix}_fetch_status = ?,
+           ${columnPrefix}_fetch_error = ?
+       WHERE id = ?`
+    )
+    .run(patch.imagePath, patch.fetchStatus, patch.fetchError, itemId);
 }
 
 export function saveEvaluation(itemId, input) {

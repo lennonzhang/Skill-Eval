@@ -12,7 +12,7 @@ import {
   itemExists,
   saveEvaluation,
 } from "./src/db.js";
-import { importResourceBatch } from "./src/importer.js";
+import { importResourceBatch, retryItemImage } from "./src/importer.js";
 import { EvaluationValidationError } from "./public/scoring.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -137,6 +137,21 @@ async function handleApi(req, res, url) {
     } catch (error) {
       if (error instanceof EvaluationValidationError) {
         sendError(res, 400, error.message, error.issues);
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+
+  const imageRetryMatch = url.pathname.match(/^\/api\/items\/([^/]+)\/images\/(source|result)\/retry$/);
+  if (req.method === "POST" && imageRetryMatch) {
+    try {
+      const retry = await retryItemImage(imageRetryMatch[1], imageRetryMatch[2]);
+      sendJson(res, 200, { retry });
+    } catch (error) {
+      if (error?.statusCode === 400 || error?.statusCode === 404) {
+        sendError(res, error.statusCode, error.message);
         return;
       }
       throw error;

@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   createBatch,
+  getItemById,
   initializeDatabase,
   insertItem,
   nowIso,
   updateBatchCounts,
   updateItemCacheStatus,
+  updateSingleImageCacheStatus,
 } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -102,7 +104,7 @@ function normalizeJsonPayload(payload) {
   return [payload];
 }
 
-async function cacheImage({ url, batchId, itemId, kind }) {
+export async function cacheImage({ url, batchId, itemId, kind }) {
   const itemDir = path.join(cacheDir, batchId, itemId);
   mkdirSync(itemDir, { recursive: true });
 
@@ -126,6 +128,57 @@ async function cacheImage({ url, batchId, itemId, kind }) {
 
   await writeFile(absolutePath, buffer);
   return relativePath;
+}
+
+export async function retryItemImage(itemId, kind) {
+  initializeDatabase();
+
+  if (!["source", "result"].includes(kind)) {
+    const error = new Error("Image kind must be source or result");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const item = getItemById(itemId);
+  if (!item) {
+    const error = new Error("Item not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const url = kind === "source" ? item.url : item.result_url;
+  const existingImagePath = kind === "source" ? item.source_image_path : item.result_image_path;
+  const patch = {
+    imagePath: existingImagePath,
+    fetchStatus: "pending",
+    fetchError: null,
+  };
+
+  try {
+    patch.imagePath = await cacheImage({
+      url,
+      batchId: item.batch_id,
+      itemId,
+      kind,
+    });
+    patch.fetchStatus = "success";
+  } catch (error) {
+    patch.fetchStatus = "failed";
+    patch.fetchError = error instanceof Error ? error.message : String(error);
+  }
+
+  updateSingleImageCacheStatus(itemId, kind, patch);
+  updateBatchCounts(item.batch_id);
+
+  return {
+    itemId,
+    batchId: item.batch_id,
+    kind,
+    imagePath: patch.imagePath,
+    imageUrl: patch.imagePath ? `/${patch.imagePath.replaceAll("\\", "/")}` : "",
+    fetchStatus: patch.fetchStatus,
+    fetchError: patch.fetchError,
+  };
 }
 
 async function readResourceRecords() {
