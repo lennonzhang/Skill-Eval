@@ -29,6 +29,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = ROOT_DIR / "data" / "app.sqlite"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "product-checks"
 SUPPORTED_IMAGE_STATUSES = {"success"}
+SCORE_VERSION = "product-check-v3"
+
+
+def log_progress(event: dict[str, Any]) -> None:
+    print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,30 @@ def _round_float(value: float | None, digits: int = 4) -> float | None:
     if value is None or not math.isfinite(value):
         return None
     return round(float(value), digits)
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return _round_float(float(value))
+    if isinstance(value, dict):
+        return {key: _normalize_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_value(child) for child in value]
+    return value
+
+
+SEVERITY_ORDER = {
+    "none": 0,
+    "mild": 1,
+    "moderate": 2,
+    "severe": 3,
+}
+
+
+def _max_severity(*levels: str) -> str:
+    return max(levels, key=lambda level: SEVERITY_ORDER[level])
 
 
 def read_rgb_image(path: Path) -> np.ndarray:
@@ -140,7 +169,88 @@ def _largest_components(mask: np.ndarray) -> np.ndarray:
     return np.isin(labels, keep_labels)
 
 
-def segment_source_product(source_rgb: np.ndarray) -> dict[str, Any]:
+def _mask_bbox(mask: np.ndarray) -> BBox | None:
+    if not np.any(mask):
+        return None
+    x, y, w, h = cv2.boundingRect(mask.astype(np.uint8))
+    return BBox(int(x), int(y), int(w), int(h))
+
+
+def _component_perimeter(component: np.ndarray) -> np.ndarray:
+    kernel = np.ones((5, 5), np.uint8)
+    dilated = cv2.dilate(component.astype(np.uint8), kernel, iterations=1) > 0
+    return dilated & ~component
+
+
+def _filter_hole_components(
+    source_rgb: np.ndarray,
+    candidate_holes: np.ndarray,
+    material_support_mask: np.ndarray,
+    silhouette_mask: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    height, width = source_rgb.shape[:2]
+    image_area = height * width
+    if not np.any(candidate_holes):
+        return np.zeros_like(candidate_holes, dtype=bool), {
+            "holeAreaRatio": 0.0,
+            "holeComponentCount": 0,
+            "holeConfidence": "none",
+        }
+
+    rgb_float = source_rgb.astype(np.int16)
+    white_distance = np.linalg.norm(rgb_float - 255, axis=2)
+    hsv = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2HSV)
+    saturation = hsv[:, :, 1]
+    white_candidate = (white_distance < 45) & (saturation < 45)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate_holes.astype(np.uint8), connectivity=8)
+    kept = np.zeros_like(candidate_holes, dtype=bool)
+    confidences: list[str] = []
+    min_area = max(32, int(image_area * 0.0002))
+    for label in range(1, count):
+        component = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        source_white_ratio = float(np.mean(white_candidate[component]))
+        source_saturation_mean = float(np.mean(saturation[component]))
+        perimeter = _component_perimeter(component)
+        perimeter_count = int(np.count_nonzero(perimeter))
+        surrounded_by_material_ratio = (
+            float(np.count_nonzero(perimeter & material_support_mask) / perimeter_count) if perimeter_count else 0.0
+        )
+        silhouette_area = max(1, int(np.count_nonzero(silhouette_mask)))
+        component_silhouette_ratio = area / silhouette_area
+        if (
+            source_white_ratio >= 0.70
+            and source_saturation_mean <= 45
+            and surrounded_by_material_ratio >= 0.50
+            and component_silhouette_ratio <= 0.45
+        ):
+            kept |= component
+            if source_white_ratio >= 0.85 and surrounded_by_material_ratio >= 0.70:
+                confidences.append("high")
+            else:
+                confidences.append("medium")
+
+    hole_area = int(np.count_nonzero(kept))
+    if not confidences:
+        confidence = "none"
+    elif "high" in confidences and len(confidences) == len([c for c in confidences if c == "high"]):
+        confidence = "high"
+    elif "high" in confidences:
+        confidence = "medium"
+    else:
+        confidence = "medium"
+
+    return kept, {
+        "holeAreaRatio": hole_area / image_area if image_area else 0.0,
+        "holeComponentCount": len(confidences),
+        "holeConfidence": confidence,
+    }
+
+
+def segment_source_product_layers(source_rgb: np.ndarray) -> dict[str, Any]:
     """Segment the foreground product from a mostly white source background."""
 
     height, width = source_rgb.shape[:2]
@@ -164,23 +274,37 @@ def segment_source_product(source_rgb: np.ndarray) -> dict[str, Any]:
         border_labels = _connected_border_labels(labels)
         flooded_background = np.isin(labels, list(border_labels)) & passable_background
 
-    product_mask = ~flooded_background
-    product_mask = cv2.morphologyEx(product_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
-    product_mask = cv2.morphologyEx(product_mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
-    product_mask = _fill_holes(product_mask)
-    product_mask = _largest_components(product_mask)
-    product_mask = _fill_holes(product_mask)
+    raw_foreground_mask = ~flooded_background
+    raw_foreground_mask = cv2.morphologyEx(raw_foreground_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
+    raw_foreground_mask = cv2.morphologyEx(raw_foreground_mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
+    filled_silhouette_mask = _fill_holes(_largest_components(raw_foreground_mask))
+    candidate_holes = filled_silhouette_mask & white_candidate
+    material_support_mask = filled_silhouette_mask & ~candidate_holes
+    hole_mask, hole_quality = _filter_hole_components(
+        source_rgb,
+        candidate_holes,
+        material_support_mask,
+        filled_silhouette_mask,
+    )
+    material_mask = filled_silhouette_mask & ~hole_mask
 
-    area = int(np.count_nonzero(product_mask))
+    contour_kernel = np.ones((5, 5), np.uint8)
+    contour_band_mask = (
+        cv2.dilate(filled_silhouette_mask.astype(np.uint8), contour_kernel, iterations=1) > 0
+    ) ^ (
+        cv2.erode(filled_silhouette_mask.astype(np.uint8), contour_kernel, iterations=1) > 0
+    )
+
+    area = int(np.count_nonzero(material_mask))
+    filled_area = int(np.count_nonzero(filled_silhouette_mask))
     image_area = height * width
     area_ratio = area / image_area if image_area else 0.0
+    filled_area_ratio = filled_area / image_area if image_area else 0.0
 
-    bbox = None
+    bbox = _mask_bbox(filled_silhouette_mask)
     fill_ratio = 0.0
-    if area:
-        x, y, w, h = cv2.boundingRect(product_mask.astype(np.uint8))
-        bbox = BBox(int(x), int(y), int(w), int(h))
-        fill_ratio = area / max(1, bbox.width * bbox.height)
+    if bbox:
+        fill_ratio = filled_area / max(1, bbox.width * bbox.height)
 
     unsupported_reason = None
     if source_white_bg_ratio < 0.60:
@@ -193,23 +317,34 @@ def segment_source_product(source_rgb: np.ndarray) -> dict[str, Any]:
     confidence = "high"
     if unsupported_reason:
         confidence = "low"
-    elif fill_ratio < 0.15 or source_white_bg_ratio < 0.70 or area_ratio < 0.02 or area_ratio > 0.35:
+    elif fill_ratio < 0.15 or source_white_bg_ratio < 0.70 or area_ratio < 0.02 or filled_area_ratio > 0.45:
         confidence = "low"
     elif source_white_bg_ratio < 0.85:
         confidence = "medium"
 
     return {
-        "mask": product_mask,
+        "mask": material_mask,
+        "materialMask": material_mask,
+        "filledSilhouetteMask": filled_silhouette_mask,
+        "holeMask": hole_mask,
+        "contourBandMask": contour_band_mask,
         "bbox": bbox,
         "unsupportedReason": unsupported_reason,
         "confidence": confidence,
         "quality": {
             "sourceWhiteBgRatio": source_white_bg_ratio,
             "maskAreaRatio": area_ratio,
+            "materialAreaRatio": area_ratio,
+            "filledSilhouetteAreaRatio": filled_area_ratio,
             "maskArea": area,
             "fillRatio": fill_ratio,
+            **hole_quality,
         },
     }
+
+
+def segment_source_product(source_rgb: np.ndarray) -> dict[str, Any]:
+    return segment_source_product_layers(source_rgb)
 
 
 def _masked_gray_ncc(source_rgb: np.ndarray, result_rgb: np.ndarray, mask: np.ndarray) -> float:
@@ -248,6 +383,27 @@ def _masked_ssim(source_rgb: np.ndarray, result_rgb: np.ndarray, mask: np.ndarra
     masked_values = ssim_map[mask_crop]
     masked_ssim = float(np.mean(masked_values)) if masked_values.size else float(crop_ssim)
     return float(crop_ssim), masked_ssim
+
+
+def _masked_diff_stats(abs_diff: np.ndarray, mask: np.ndarray) -> tuple[float, float]:
+    values = abs_diff[mask]
+    if values.size == 0:
+        return 1.0, 1.0
+    return float(np.mean(values)), float(np.percentile(values, 90))
+
+
+def _hole_closure_score(source_rgb: np.ndarray, result_rgb: np.ndarray, material_mask: np.ndarray, hole_mask: np.ndarray) -> float | None:
+    if not np.any(hole_mask) or not np.any(material_mask):
+        return None
+    lab_source = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    material_pixels = lab_source[material_mask]
+    hole_pixels = lab_result[hole_mask]
+    if material_pixels.size == 0 or hole_pixels.size == 0:
+        return None
+    material_mean = np.mean(material_pixels, axis=0)
+    distances = np.linalg.norm(hole_pixels - material_mean, axis=1)
+    return float(np.mean(distances <= 18.0))
 
 
 def _local_offset_search(
@@ -350,43 +506,290 @@ def compute_metrics(source_rgb: np.ndarray, result_rgb: np.ndarray, mask: np.nda
     }
 
 
-def score_product(metrics: dict[str, Any]) -> tuple[int, list[str]]:
-    mean_abs_diff = float(metrics["meanAbsDiff"])
-    p90_abs_diff = float(metrics["p90AbsDiff"])
-    edge_band_diff = float(metrics["edgeBandDiff"])
-    ssim = float(metrics["ssim"])
-    ncc = float(metrics["ncc"])
+def compute_layered_metrics(source_rgb: np.ndarray, result_rgb: np.ndarray, layers: dict[str, Any]) -> dict[str, Any]:
+    material_mask = layers["materialMask"]
+    filled_silhouette_mask = layers["filledSilhouetteMask"]
+    hole_mask = layers["holeMask"]
+    contour_band_mask = layers["contourBandMask"]
+    bbox = layers["bbox"]
+
+    abs_diff = np.abs(source_rgb.astype(np.int16) - result_rgb.astype(np.int16)).mean(axis=2) / 255.0
+    material_mean_diff, material_p90_diff = _masked_diff_stats(abs_diff, material_mask)
+    silhouette_mean_diff, _ = _masked_diff_stats(abs_diff, filled_silhouette_mask)
+    contour_values = abs_diff[contour_band_mask]
+    contour_edge_diff = float(np.mean(contour_values)) if contour_values.size else material_mean_diff
+    hole_mean_diff = float(np.mean(abs_diff[hole_mask])) if np.any(hole_mask) else None
+
+    lab_source = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_delta = np.linalg.norm(lab_source - lab_result, axis=2) / 255.0
+    material_lab_values = lab_delta[material_mask]
+    material_lab_delta_mean = float(np.mean(material_lab_values)) if material_lab_values.size else 1.0
+
+    crop_ssim, material_ssim = _masked_ssim(source_rgb, result_rgb, material_mask, bbox)
+    material_ncc = _masked_gray_ncc(source_rgb, result_rgb, material_mask)
+    offset = _local_offset_search(source_rgb, result_rgb, material_mask, bbox)
+    offset_improvement = material_mean_diff - float(offset["bestOffsetDiff"])
+    edge_concentration = contour_edge_diff / max(material_mean_diff, 1e-6)
+
+    hole_boundary_diff = None
+    if np.any(hole_mask):
+        hole_boundary = _component_perimeter(hole_mask) & filled_silhouette_mask
+        boundary_values = abs_diff[hole_boundary]
+        hole_boundary_diff = float(np.mean(boundary_values)) if boundary_values.size else None
+
+    hole_closure_score = _hole_closure_score(source_rgb, result_rgb, material_mask, hole_mask)
+
+    return {
+        "materialMeanDiff": material_mean_diff,
+        "materialP90Diff": material_p90_diff,
+        "materialSsim": material_ssim,
+        "materialNcc": material_ncc,
+        "silhouetteMeanDiff": silhouette_mean_diff,
+        "contourEdgeDiff": contour_edge_diff,
+        "holeMeanDiff": hole_mean_diff,
+        "holeClosureScore": hole_closure_score,
+        "holeBoundaryDiff": hole_boundary_diff,
+        "meanAbsDiff": material_mean_diff,
+        "p90AbsDiff": material_p90_diff,
+        "labDeltaMean": material_lab_delta_mean,
+        "edgeBandDiff": contour_edge_diff,
+        "edgeConcentration": edge_concentration,
+        "ssim": material_ssim,
+        "cropSsim": crop_ssim,
+        "ncc": material_ncc,
+        "bestOffset": offset,
+        "offsetImprovement": offset_improvement,
+    }
+
+
+def _bbox_diagonal(quality: dict[str, Any], metrics: dict[str, Any]) -> float:
+    bbox = metrics.get("sourceBbox") or quality.get("sourceBbox")
+    if isinstance(bbox, dict):
+        width = float(bbox.get("width", 0) or 0)
+        height = float(bbox.get("height", 0) or 0)
+        return math.sqrt(width * width + height * height)
+    return 0.0
+
+
+def _alignment_signal(metrics: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
+    offset = metrics["bestOffset"]
+    offset_magnitude = float(offset["magnitude"])
+    match_score = float(offset["matchScore"])
+    improvement = float(metrics["offsetImprovement"])
+    bbox_diagonal = _bbox_diagonal(quality, metrics)
+    raw_move_threshold = max(12.0, bbox_diagonal * 0.025) if bbox_diagonal else 12.0
+    move_threshold = float(max(12, round(raw_move_threshold)))
+
+    moved = offset_magnitude >= move_threshold and improvement >= 0.035 and match_score >= 0.72
+    if moved:
+        severity = "severe"
+    elif offset_magnitude >= max(6.0, move_threshold * 0.5) and improvement >= 0.02 and match_score >= 0.72:
+        severity = "moderate"
+    elif offset_magnitude >= 4.0 and improvement >= 0.01:
+        severity = "mild"
+    else:
+        severity = "none"
+
+    return {
+        "severity": severity,
+        "moved": moved,
+        "offsetMagnitude": offset_magnitude,
+        "offsetImprovement": improvement,
+        "matchScore": match_score,
+        "moveThreshold": move_threshold,
+        "rawMoveThreshold": raw_move_threshold,
+    }
+
+
+def _material_signal(metrics: dict[str, Any]) -> dict[str, Any]:
+    material_mean_diff = float(metrics["materialMeanDiff"])
+    material_p90_diff = float(metrics["materialP90Diff"])
+    material_ssim = float(metrics["materialSsim"])
+    material_ncc = float(metrics["materialNcc"])
+
+    severity = "none"
+    if material_p90_diff > 0.40 or material_mean_diff > 0.18 or material_ssim < 0.62 or material_ncc < 0.40:
+        severity = "severe"
+    elif material_p90_diff > 0.22 or material_mean_diff > 0.10 or material_ssim < 0.78 or material_ncc < 0.78:
+        severity = "moderate"
+    elif material_p90_diff > 0.12 or material_mean_diff > 0.06 or material_ssim < 0.88 or material_ncc < 0.90:
+        severity = "mild"
+
+    return {
+        "severity": severity,
+        "materialMeanDiff": material_mean_diff,
+        "materialP90Diff": material_p90_diff,
+        "materialSsim": material_ssim,
+        "materialNcc": material_ncc,
+    }
+
+
+def _geometry_signal(metrics: dict[str, Any], material: dict[str, Any]) -> dict[str, Any]:
+    contour_edge_diff = float(metrics["contourEdgeDiff"])
+    material_p90_diff = float(metrics["materialP90Diff"])
+    material_ssim = float(metrics["materialSsim"])
+    match_score = float(metrics["bestOffset"]["matchScore"])
+
+    severity = "none"
+    if contour_edge_diff > 0.55 and (material_p90_diff > 0.22 or material_ssim < 0.72 or match_score < 0.78):
+        severity = "severe"
+    elif contour_edge_diff > 0.40 and (material_p90_diff > 0.14 or material_ssim < 0.84):
+        severity = "moderate"
+    elif contour_edge_diff > 0.30:
+        severity = "mild"
+
+    if material["severity"] == "none" and contour_edge_diff < 0.55:
+        severity = "mild" if severity != "none" else "none"
+
+    return {
+        "severity": severity,
+        "contourEdgeDiff": contour_edge_diff,
+        "matchScore": match_score,
+    }
+
+
+def _hole_signal(metrics: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
+    hole_closure_score = metrics.get("holeClosureScore")
+    hole_boundary_diff = metrics.get("holeBoundaryDiff")
+    hole_confidence = str(quality.get("holeConfidence") or "none")
+
+    severity = "none"
+    filled = False
+    if hole_closure_score is not None and float(hole_closure_score) > 0.45:
+        severity = "severe"
+        filled = True
+    elif hole_boundary_diff is not None and float(hole_boundary_diff) > 0.42:
+        severity = "moderate"
+    elif hole_boundary_diff is not None and float(hole_boundary_diff) > 0.30:
+        severity = "mild"
+
+    return {
+        "severity": severity,
+        "filled": filled,
+        "holeConfidence": hole_confidence,
+        "holeClosureScore": None if hole_closure_score is None else float(hole_closure_score),
+        "holeBoundaryDiff": None if hole_boundary_diff is None else float(hole_boundary_diff),
+    }
+
+
+def build_damage_signals(metrics: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
+    material = _material_signal(metrics)
+    return {
+        "alignment": _alignment_signal(metrics, quality),
+        "material": material,
+        "geometry": _geometry_signal(metrics, material),
+        "hole": _hole_signal(metrics, quality),
+    }
+
+
+def score_product_v3(metrics: dict[str, Any], quality: dict[str, Any]) -> tuple[int, list[str], list[str], dict[str, Any]]:
+    material_mean_diff = float(metrics["materialMeanDiff"])
+    material_p90_diff = float(metrics["materialP90Diff"])
+    contour_edge_diff = float(metrics["contourEdgeDiff"])
+    material_ncc = float(metrics["materialNcc"])
     offset = metrics["bestOffset"]
     match_score = float(offset["matchScore"])
-    offset_magnitude = float(offset["magnitude"])
-    improvement = float(metrics["offsetImprovement"])
-    edge_concentration = float(metrics["edgeConcentration"])
 
-    if match_score < 0.50 or mean_abs_diff > 0.34 or ncc < 0.45:
-        score = 1
-    elif offset_magnitude > 10 and improvement > 0.04:
+    tags: list[str] = []
+    reasons: list[str] = []
+    damage_signals = build_damage_signals(metrics, quality)
+    alignment = damage_signals["alignment"]
+    material = damage_signals["material"]
+    geometry = damage_signals["geometry"]
+    hole = damage_signals["hole"]
+    registration_jitter = (
+        not alignment["moved"]
+        and alignment["offsetMagnitude"] > 0
+        and alignment["offsetMagnitude"] < alignment["moveThreshold"]
+        and alignment["matchScore"] >= 0.92
+        and alignment["offsetImprovement"] >= 0.03
+    )
+    if registration_jitter:
+        alignment["registrationJitter"] = True
+        if alignment["offsetMagnitude"] < 4:
+            alignment["severity"] = "mild"
+            material["severity"] = "none"
+            geometry["severity"] = "none"
+        else:
+            material["severity"] = "mild" if material["severity"] != "none" else "none"
+            geometry["severity"] = "mild" if geometry["severity"] != "none" else "none"
+
+    if alignment["moved"]:
+        return 1, ["product_moved"], ["hard gate 1: protected product moved"], damage_signals
+
+    if not registration_jitter and (match_score < 0.45 or material_mean_diff > 0.34 or material_ncc < 0.40):
+        tags.append("product_changed")
+        reasons.append("hard gate 1: severe material mismatch")
+        return 1, tags, reasons, damage_signals
+
+    if material["severity"] == "severe":
+        tags.append("product_changed")
+    if geometry["severity"] == "severe" or (material["severity"] == "severe" and material_p90_diff > 0.50):
+        tags.append("silhouette_damage")
+    if geometry["severity"] in {"moderate", "severe"} and material_p90_diff > 0.22:
+        tags.append("foreground_overlap")
+    if hole["filled"]:
+        tags.append("hole_filled")
+    if material_p90_diff > 0.45 and material_mean_diff < 0.24:
+        tags.append("artifact")
+
+    worst_severity = _max_severity(
+        material["severity"],
+        geometry["severity"],
+        hole["severity"],
+        "moderate" if alignment["severity"] == "moderate" else "none",
+    )
+
+    if hole["filled"]:
         score = 2
-    elif edge_band_diff > 0.24 or p90_abs_diff > 0.40 or ssim < 0.62:
+        reasons.append("hard cap 2: hole filled")
+    elif material["severity"] == "severe" or geometry["severity"] == "severe":
         score = 2
-    elif mean_abs_diff > 0.16 or ncc < 0.78 or ssim < 0.78:
+        reasons.append("hard cap 2: severe product damage")
+    elif worst_severity == "moderate":
         score = 3
-    elif mean_abs_diff > 0.08 or edge_band_diff > 0.14 or ncc < 0.90 or ssim < 0.88:
+    elif worst_severity == "mild":
         score = 4
     else:
         score = 5
 
-    tags: list[str] = []
-    if match_score < 0.50 or mean_abs_diff > 0.16 or ncc < 0.78 or ssim < 0.78:
-        tags.append("product_changed")
-    if offset_magnitude > 10 and improvement > 0.04:
-        tags.append("product_moved")
-    if edge_band_diff > 0.24 or p90_abs_diff > 0.40:
-        tags.append("silhouette_damage")
-    if edge_band_diff > 0.24 and edge_concentration > 1.25:
-        tags.append("foreground_overlap")
-    if p90_abs_diff > 0.45 and mean_abs_diff < 0.24:
-        tags.append("artifact")
+    if material["severity"] != "none":
+        reasons.append(f"material {material['severity']}")
+    if geometry["severity"] != "none":
+        reasons.append(f"geometry {geometry['severity']}")
+    if alignment["severity"] not in {"none", "severe"}:
+        reasons.append(f"alignment {alignment['severity']}")
+    if registration_jitter:
+        reasons.append("small offset matched as registration jitter")
+    if hole["severity"] != "none" and not hole["filled"]:
+        reasons.append(f"hole boundary {hole['severity']}")
 
+    if not tags and score < 3:
+        score = 3
+        reasons.append("floor 3: no hard product-damage tag")
+    if (
+        not tags
+        and material_mean_diff < 0.06
+        and material_p90_diff < 0.12
+        and match_score > 0.88
+        and score < 4
+    ):
+        score = 4
+        reasons.append("floor 4: low material diff and strong match")
+
+    if not reasons:
+        reasons.append("material stable")
+    if contour_edge_diff > 0.24 and score >= 4:
+        reasons.append("edge change treated as soft evidence")
+    if quality.get("holeConfidence") in {"medium", "high"} and "hole_filled" not in tags:
+        reasons.append("hole preserved")
+
+    return score, tags, reasons, damage_signals
+
+
+def score_product(metrics: dict[str, Any], quality: dict[str, Any] | None = None) -> tuple[int, list[str]]:
+    score, tags, _, _ = score_product_v3(metrics, quality or {})
     return score, tags
 
 
@@ -416,15 +819,25 @@ def analyze_pair(source_rgb: np.ndarray, result_rgb: np.ndarray) -> dict[str, An
             "suggestedScore": None,
             "confidence": "low",
             "tags": [],
-            "maskQuality": {key: _round_float(value) for key, value in quality.items()},
+            "maskQuality": {key: _normalize_json_value(value) for key, value in quality.items()},
             "sourceBbox": bbox.as_dict() if bbox else None,
         }
 
-    metrics = compute_metrics(source_rgb, result_rgb, mask, bbox)
-    score, tags = score_product(metrics)
+    metrics = compute_layered_metrics(source_rgb, result_rgb, segmentation)
+    metrics["sourceBbox"] = bbox.as_dict()
+    score, tags, score_reasons, damage_signals = score_product_v3(metrics, quality)
     confidence = str(segmentation["confidence"])
 
     normalized_metrics = {
+        "materialMeanDiff": _round_float(metrics["materialMeanDiff"]),
+        "materialP90Diff": _round_float(metrics["materialP90Diff"]),
+        "materialSsim": _round_float(metrics["materialSsim"]),
+        "materialNcc": _round_float(metrics["materialNcc"]),
+        "silhouetteMeanDiff": _round_float(metrics["silhouetteMeanDiff"]),
+        "contourEdgeDiff": _round_float(metrics["contourEdgeDiff"]),
+        "holeMeanDiff": _round_float(metrics["holeMeanDiff"]),
+        "holeClosureScore": _round_float(metrics["holeClosureScore"]),
+        "holeBoundaryDiff": _round_float(metrics["holeBoundaryDiff"]),
         "meanAbsDiff": _round_float(metrics["meanAbsDiff"]),
         "p90AbsDiff": _round_float(metrics["p90AbsDiff"]),
         "labDeltaMean": _round_float(metrics["labDeltaMean"]),
@@ -444,16 +857,23 @@ def analyze_pair(source_rgb: np.ndarray, result_rgb: np.ndarray) -> dict[str, An
     }
 
     return {
+        "scoreVersion": SCORE_VERSION,
         "status": "checked",
         "unsupportedReason": None,
         "suggestedScore": score,
         "confidence": confidence,
         "tags": tags,
-        "maskQuality": {key: _round_float(value) for key, value in quality.items()},
+        "scoreReasons": score_reasons,
+        "damageSignals": _normalize_json_value(damage_signals),
+        "maskQuality": {key: _normalize_json_value(value) for key, value in quality.items()},
         "sourceBbox": bbox.as_dict(),
         "metrics": normalized_metrics,
         "_debug": {
             "mask": mask,
+            "materialMask": segmentation["materialMask"],
+            "filledSilhouetteMask": segmentation["filledSilhouetteMask"],
+            "holeMask": segmentation["holeMask"],
+            "contourBandMask": segmentation["contourBandMask"],
             "bbox": bbox,
         },
     }
@@ -498,6 +918,21 @@ def _apply_mask_overlay(image_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return output
 
 
+def _apply_hole_overlay(image_rgb: np.ndarray, material_mask: np.ndarray, hole_mask: np.ndarray) -> np.ndarray:
+    overlay = image_rgb.copy().astype(np.float32)
+    material_color = np.zeros_like(overlay)
+    material_color[:, :, 1] = 255
+    hole_color = np.zeros_like(overlay)
+    hole_color[:, :, 0] = 255
+    hole_color[:, :, 2] = 255
+    overlay[material_mask] = overlay[material_mask] * 0.70 + material_color[material_mask] * 0.30
+    overlay[hole_mask] = overlay[hole_mask] * 0.35 + hole_color[hole_mask] * 0.65
+    output = np.clip(overlay, 0, 255).astype(np.uint8)
+    contours, _ = cv2.findContours(hole_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(output, contours, -1, (180, 0, 180), 2)
+    return output
+
+
 def _draw_result_match(result_rgb: np.ndarray, bbox: BBox, metrics: dict[str, Any]) -> np.ndarray:
     output = result_rgb.copy()
     cv2.rectangle(output, (bbox.x, bbox.y), (bbox.x2, bbox.y2), (40, 120, 255), 3)
@@ -526,7 +961,9 @@ def write_visualizations(
     item_id: str,
 ) -> dict[str, str]:
     debug = analysis.get("_debug") or {}
-    mask = debug.get("mask")
+    mask = debug.get("filledSilhouetteMask") if debug.get("filledSilhouetteMask") is not None else debug.get("mask")
+    material_mask = debug.get("materialMask") if debug.get("materialMask") is not None else debug.get("mask")
+    hole_mask = debug.get("holeMask")
     bbox = debug.get("bbox")
     if mask is None or bbox is None:
         return {}
@@ -534,12 +971,16 @@ def write_visualizations(
     overlays_dir.mkdir(parents=True, exist_ok=True)
     outputs = {
         "sourceMask": overlays_dir / f"{item_id}-source-mask.png",
+        "materialMask": overlays_dir / f"{item_id}-material-mask.png",
+        "holeMask": overlays_dir / f"{item_id}-hole-mask.png",
         "resultMatch": overlays_dir / f"{item_id}-result-match.png",
         "diffHeatmap": overlays_dir / f"{item_id}-diff-heatmap.png",
     }
 
     images = {
         "sourceMask": _apply_mask_overlay(source_rgb, mask),
+        "materialMask": _apply_mask_overlay(source_rgb, material_mask),
+        "holeMask": _apply_hole_overlay(source_rgb, material_mask, hole_mask if hole_mask is not None else np.zeros_like(mask)),
         "resultMatch": _draw_result_match(result_rgb, bbox, analysis["metrics"]),
         "diffHeatmap": _draw_diff_heatmap(source_rgb, result_rgb, mask),
     }
@@ -737,7 +1178,32 @@ def main() -> int:
     output_dir = output_root / default_output_key(filters)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    items = [analyze_row(row, output_dir, args.visualize) for row in rows]
+    log_progress(
+        {
+            "event": "product-check:start",
+            "selected": len(rows),
+            "filters": filters,
+            "outputDir": _relpath(output_dir),
+            "visualize": args.visualize,
+        }
+    )
+    items = []
+    for index, row in enumerate(rows, start=1):
+        analysis = analyze_row(row, output_dir, args.visualize)
+        items.append(analysis)
+        log_progress(
+            {
+                "event": "product-check:item",
+                "index": index,
+                "total": len(rows),
+                "batchId": analysis.get("batchId"),
+                "itemId": analysis.get("itemId"),
+                "model": analysis.get("model"),
+                "status": analysis.get("status"),
+                "suggestedScore": analysis.get("suggestedScore"),
+                "unsupportedReason": analysis.get("unsupportedReason"),
+            }
+        )
     payload = {
         "ok": True,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -749,7 +1215,7 @@ def main() -> int:
 
     result_path = output_dir / "results.json"
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"ok": True, "output": _relpath(result_path), "summary": payload["summary"]}, indent=2))
+    log_progress({"event": "product-check:finish", "output": _relpath(result_path), "summary": payload["summary"]})
     return 0
 
 

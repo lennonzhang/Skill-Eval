@@ -20,6 +20,9 @@ const result = await importResourceBatch({
   batchName,
   downloadImages: !noImages,
   files: fileArgs,
+  onProgress: (event) => {
+    console.error(JSON.stringify(event));
+  },
 });
 
 console.log(JSON.stringify(result, null, 2));

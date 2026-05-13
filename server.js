@@ -30,6 +30,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function logEvent(scope, event) {
+  console.log(JSON.stringify({ at: nowIso(), scope, ...event }));
+}
+
 function sendJson(res, statusCode, body) {
   const data = JSON.stringify(body);
   res.writeHead(statusCode, {
@@ -178,6 +182,20 @@ async function appendProductCheckLog(batchId, message) {
   await appendFile(productCheckLogPath(batchId), message, "utf8");
 }
 
+function forwardProductCheckOutput(batchId, stream, chunk) {
+  const text = chunk.toString();
+  appendProductCheckLog(batchId, text).catch((error) => console.error(error));
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const payload = JSON.parse(line);
+      logEvent("product-check", { batchId, stream, ...payload });
+    } catch {
+      logEvent("product-check", { batchId, stream, message: line });
+    }
+  }
+}
+
 async function startProductCheckRun(batchId) {
   if (productCheckJobs.has(batchId)) {
     return { statusCode: 409, status: await readProductCheckStatus(batchId) };
@@ -198,6 +216,7 @@ async function startProductCheckRun(batchId) {
     error: null,
   });
   await writeFile(productCheckLogPath(batchId), "", "utf8");
+  logEvent("product-check", { event: "start", batchId });
 
   const child = spawn(
     process.execPath,
@@ -211,12 +230,13 @@ async function startProductCheckRun(batchId) {
   status.pid = child.pid;
   writeProductCheckStatus(batchId, status);
   productCheckJobs.set(batchId, child);
+  logEvent("product-check", { event: "spawned", batchId, pid: child.pid });
 
   child.stdout.on("data", (chunk) => {
-    appendProductCheckLog(batchId, chunk.toString()).catch((error) => console.error(error));
+    forwardProductCheckOutput(batchId, "stdout", chunk);
   });
   child.stderr.on("data", (chunk) => {
-    appendProductCheckLog(batchId, chunk.toString()).catch((error) => console.error(error));
+    forwardProductCheckOutput(batchId, "stderr", chunk);
   });
   child.on("error", (error) => {
     const next = {
@@ -228,6 +248,7 @@ async function startProductCheckRun(batchId) {
     };
     productCheckJobs.delete(batchId);
     writeProductCheckStatus(batchId, next);
+    logEvent("product-check", { event: "failed", batchId, error: error.message });
   });
   child.on("close", async (code) => {
     productCheckJobs.delete(batchId);
@@ -243,12 +264,19 @@ async function startProductCheckRun(batchId) {
     } else {
       error = `Product Check exited with code ${code}`;
     }
-    writeProductCheckStatus(batchId, {
+    const next = writeProductCheckStatus(batchId, {
       batchId,
       status: code === 0 && !error ? "succeeded" : "failed",
       startedAt: status.startedAt,
       finishedAt: nowIso(),
       pid: child.pid,
+      exitCode: code,
+      summary,
+      error,
+    });
+    logEvent("product-check", {
+      event: next.status,
+      batchId,
       exitCode: code,
       summary,
       error,
@@ -271,10 +299,27 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/import") {
     const body = await readBody(req);
+    logEvent("import", {
+      event: "request",
+      sourceFile: body.file || null,
+      downloadImages: body.downloadImages !== false,
+    });
     const result = await importResourceBatch({
       batchName: body.name,
       downloadImages: body.downloadImages !== false,
       files: body.file ? [body.file] : [],
+      onProgress: (event) => logEvent("import", event),
+    });
+    logEvent("import", {
+      event: "response",
+      batchId: result.batch.id,
+      sourceFile: result.batch.sourceFile,
+      parsed: result.parsed,
+      inserted: result.inserted,
+      duplicate: result.duplicate,
+      cachedSource: result.cachedSource,
+      cachedResult: result.cachedResult,
+      errors: result.errors.length,
     });
     sendJson(res, 200, result);
     return;

@@ -105,6 +105,14 @@ function normalizeJsonPayload(payload) {
   return [payload];
 }
 
+function emitProgress(onProgress, event) {
+  if (typeof onProgress !== "function") return;
+  onProgress({
+    at: nowIso(),
+    ...event,
+  });
+}
+
 export async function cacheImage({ url, batchId, itemId, kind }) {
   const itemDir = path.join(cacheDir, batchId, itemId);
   mkdirSync(itemDir, { recursive: true });
@@ -267,7 +275,7 @@ async function writeImportRunSummary(batchId, summary) {
   return path.relative(rootDir, filePath);
 }
 
-export async function importResourceBatch({ batchName, downloadImages = true, files = [] } = {}) {
+export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress } = {}) {
   initializeDatabase();
 
   if (files.length !== 1) {
@@ -278,6 +286,11 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
 
   const sourceFile = normalizeResourceFileName(files[0]);
   const startedAt = nowIso();
+  emitProgress(onProgress, {
+    type: "import:start",
+    sourceFile,
+    downloadImages,
+  });
   const { records, errors, files: importedFiles } = await readResourceRecords({ files });
   const date = new Date();
   const batchId = batchIdForDate(date);
@@ -291,11 +304,19 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     sourceFile,
     importedAt,
   });
+  emitProgress(onProgress, {
+    type: "import:parsed",
+    batchId,
+    sourceFile,
+    parsed: records.length,
+    parseErrors: errors.length,
+  });
 
   let inserted = 0;
   let duplicate = 0;
   let cachedSource = 0;
   let cachedResult = 0;
+  let processed = 0;
 
   for (const record of records) {
     const itemId = `item-${hash(`${batchId}\n${record.importKey}\n${record.rawJsonFile}\n${record.rawIndex}`)}`;
@@ -323,11 +344,39 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     const wasInserted = insertItem(baseItem);
     if (!wasInserted) {
       duplicate += 1;
+      processed += 1;
+      emitProgress(onProgress, {
+        type: "import:item",
+        batchId,
+        itemId,
+        model: record.model,
+        index: processed,
+        total: records.length,
+        inserted,
+        duplicate,
+        sourceStatus: "duplicate",
+        resultStatus: "duplicate",
+      });
       continue;
     }
     inserted += 1;
 
-    if (!downloadImages) continue;
+    if (!downloadImages) {
+      processed += 1;
+      emitProgress(onProgress, {
+        type: "import:item",
+        batchId,
+        itemId,
+        model: record.model,
+        index: processed,
+        total: records.length,
+        inserted,
+        duplicate,
+        sourceStatus: "skipped",
+        resultStatus: "skipped",
+      });
+      continue;
+    }
 
     const patch = {
       sourceImagePath: null,
@@ -367,6 +416,19 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     }
 
     updateItemCacheStatus(itemId, patch);
+    processed += 1;
+    emitProgress(onProgress, {
+      type: "import:item",
+      batchId,
+      itemId,
+      model: record.model,
+      index: processed,
+      total: records.length,
+      inserted,
+      duplicate,
+      sourceStatus: patch.sourceFetchStatus,
+      resultStatus: patch.resultFetchStatus,
+    });
   }
 
   updateBatchCounts(batchId);
@@ -406,6 +468,18 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     errors,
     cacheDir: result.cacheDir,
     modelCounts: result.modelCounts,
+  });
+  emitProgress(onProgress, {
+    type: "import:finish",
+    batchId,
+    sourceFile,
+    parsed: result.parsed,
+    inserted,
+    duplicate,
+    cachedSource,
+    cachedResult,
+    parseErrors: errors.length,
+    importRun: result.importRun,
   });
 
   return result;

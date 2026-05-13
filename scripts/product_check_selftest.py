@@ -44,6 +44,29 @@ def draw_product(
     return output
 
 
+def draw_ring_product(
+    image: np.ndarray,
+    center: tuple[int, int] = (128, 128),
+    outer_radius: int = 58,
+    inner_radius: int = 28,
+    color: tuple[int, int, int] = (45, 90, 180),
+) -> np.ndarray:
+    output = image.copy()
+    cv2.circle(output, center, outer_radius, color, -1)
+    cv2.circle(output, center, outer_radius, (15, 25, 55), 4)
+    cv2.circle(output, center, inner_radius, (255, 255, 255), -1)
+    cv2.circle(output, center, inner_radius, (15, 25, 55), 4)
+    return output
+
+
+def draw_solid_white_product(image: np.ndarray) -> np.ndarray:
+    output = image.copy()
+    cv2.ellipse(output, (128, 128), (58, 38), 0, 0, 360, (238, 240, 242), -1)
+    cv2.ellipse(output, (128, 128), (58, 38), 0, 0, 360, (80, 80, 80), 4)
+    cv2.line(output, (92, 120), (164, 120), (225, 228, 230), 3)
+    return output
+
+
 def run_case(name: str, source: np.ndarray, result: np.ndarray, validate) -> dict:
     analysis = analyze_pair(source, result)
     validate(analysis)
@@ -53,7 +76,9 @@ def run_case(name: str, source: np.ndarray, result: np.ndarray, validate) -> dic
         "score": analysis.get("suggestedScore"),
         "confidence": analysis.get("confidence"),
         "tags": analysis.get("tags", []),
+        "scoreReasons": analysis.get("scoreReasons", []),
         "unsupportedReason": analysis.get("unsupportedReason"),
+        "maskQuality": analysis.get("maskQuality", {}),
         "metrics": analysis.get("metrics", {}),
     }
 
@@ -86,8 +111,25 @@ def main() -> int:
             source,
             moved,
             lambda a: (
-                assert_true(a["suggestedScore"] <= 2, "moved product should be capped low"),
+                assert_true(a["suggestedScore"] == 1, "moved product should be a hard 1"),
                 assert_true("product_moved" in a["tags"], "moved product should be tagged"),
+                assert_true(
+                    a.get("damageSignals", {}).get("alignment", {}).get("moved") is True,
+                    "moved product should expose alignment damage signal",
+                ),
+            ),
+        )
+    )
+
+    tiny_shift = draw_product(canvas(), dx=3)
+    cases.append(
+        run_case(
+            "tiny_shift_not_moved",
+            source,
+            tiny_shift,
+            lambda a: (
+                assert_true(a["suggestedScore"] >= 3, "tiny alignment noise should not be a hard low score"),
+                assert_true("product_moved" not in a["tags"], "tiny shift should not be tagged as moved"),
             ),
         )
     )
@@ -205,9 +247,132 @@ def main() -> int:
         )
     )
 
+    ring_source = draw_ring_product(canvas())
+    ring_hole_background_changed = ring_source.copy()
+    cv2.circle(ring_hole_background_changed, (128, 128), 24, (232, 238, 244), -1)
+    cases.append(
+        run_case(
+            "ring_hole_background_changed",
+            ring_source,
+            ring_hole_background_changed,
+            lambda a: (
+                assert_true(a["suggestedScore"] >= 4, "hole background change should remain high"),
+                assert_true("hole_filled" not in a["tags"], "hole background change should not be hole_filled"),
+                assert_true("silhouette_damage" not in a["tags"], "hole background change should not damage silhouette"),
+            ),
+        )
+    )
+
+    ring_hole_filled = ring_source.copy()
+    cv2.circle(ring_hole_filled, (128, 128), 24, (45, 90, 180), -1)
+    cases.append(
+        run_case(
+            "ring_hole_filled",
+            ring_source,
+            ring_hole_filled,
+            lambda a: (
+                assert_true(a["suggestedScore"] <= 2, "filled hole should be capped low"),
+                assert_true("hole_filled" in a["tags"], "filled hole should be tagged"),
+            ),
+        )
+    )
+
+    solid_white_source = draw_solid_white_product(canvas())
+    cases.append(
+        run_case(
+            "solid_white_product_no_hole",
+            solid_white_source,
+            solid_white_source.copy(),
+            lambda a: (
+                assert_true(a["status"] == "checked", "solid white product should be checked"),
+                assert_true(
+                    a["maskQuality"].get("holeAreaRatio", 0) == 0
+                    or a["maskQuality"].get("holeConfidence") == "none",
+                    "solid product should not expose a confident hole",
+                ),
+                assert_true(a["suggestedScore"] >= 4, "unchanged solid white product should stay high"),
+            ),
+        )
+    )
+
+    edge_shadow_only = source.copy()
+    cv2.polylines(
+        edge_shadow_only,
+        [np.array([[74, 67], [173, 55], [194, 162], [94, 189]])],
+        isClosed=True,
+        color=(210, 210, 210),
+        thickness=7,
+    )
+    edge_shadow_only = draw_product(edge_shadow_only)
+    cases.append(
+        run_case(
+            "edge_shadow_only",
+            source,
+            edge_shadow_only,
+            lambda a: (
+                assert_true(a["suggestedScore"] >= 4, "edge-only change should not be capped low"),
+                assert_true("silhouette_damage" not in a["tags"], "edge-only change should not hard-tag silhouette"),
+            ),
+        )
+    )
+
+    real_silhouette_damage = source.copy()
+    cv2.rectangle(real_silhouette_damage, (78, 70), (122, 188), (255, 255, 255), -1)
+    cases.append(
+        run_case(
+            "real_silhouette_damage",
+            source,
+            real_silhouette_damage,
+            lambda a: (
+                assert_true(a["suggestedScore"] <= 2, "real silhouette damage should score low"),
+                assert_true("silhouette_damage" in a["tags"], "real silhouette damage should be tagged"),
+            ),
+        )
+    )
+
+    edge_threshold_regression = source.copy()
+    cv2.polylines(
+        edge_threshold_regression,
+        [np.array([[76, 68], [172, 56], [192, 161], [95, 187]])],
+        isClosed=True,
+        color=(205, 205, 205),
+        thickness=5,
+    )
+    edge_threshold_regression = draw_product(edge_threshold_regression)
+    cases.append(
+        run_case(
+            "edge_threshold_regression",
+            source,
+            edge_threshold_regression,
+            lambda a: assert_true(
+                a["suggestedScore"] >= 4,
+                "low material diff with contour edge change should not drop directly to 2",
+            ),
+        )
+    )
+
+    mild_structure_change = source.copy()
+    cv2.GaussianBlur(mild_structure_change, (5, 5), 0, dst=mild_structure_change)
+    mild_case = run_case(
+        "no_tag_low_score_guard",
+        source,
+        mild_structure_change,
+        lambda a: (
+            assert_true(
+                not a["tags"] or a["suggestedScore"] >= 3,
+                "items without hard tags should not score below 3",
+            ),
+            assert_true(
+                "product_moved" not in a["tags"],
+                "structure-only noise should not be tagged as movement",
+            ),
+        ),
+    )
+    cases.append(mild_case)
+
     visualization_analysis = analyze_pair(source, moved)
     overlays = write_visualizations(source, moved, visualization_analysis, SELFTEST_DIR / "overlays", "synthetic-moved")
-    expected_overlay_keys = {"sourceMask", "resultMatch", "diffHeatmap"}
+    expected_overlay_keys = {"sourceMask", "materialMask", "holeMask", "resultMatch", "diffHeatmap"}
     assert_true(set(overlays) == expected_overlay_keys, "visualization should write all overlays")
     for path_value in overlays.values():
         path = ROOT_DIR / path_value

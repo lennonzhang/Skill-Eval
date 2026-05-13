@@ -72,9 +72,11 @@ data/import-runs/<batchId>.json
 
 The import summary includes counts, cache success/failure totals, and parse errors. It intentionally does not include prompt text, source URLs, result URLs, or optimization prompts.
 
+During import, both `pnpm run import:resource` and the local review server emit JSONL progress to the terminal. The events include the selected resource filename, batch id, item id, model, processed count, insert/duplicate counts, and source/result cache status. They do not print prompt text or remote URLs.
+
 ## Product Consistency Check
 
-The v0.3 prototype is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a mostly white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
+Product Check v3 is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a mostly white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
 
 Install the Python dependencies once:
 
@@ -97,6 +99,14 @@ and reads final results from:
 data/product-checks/<batchId>/results.json
 ```
 
+Product Check emits JSONL progress to the terminal and mirrors child-process output to:
+
+```text
+data/product-checks/<batchId>/run.log
+```
+
+Progress events include selected item counts, item ids, models, status, suggested score, unsupported reason, and final summary. They do not include prompt text or remote URLs.
+
 Common runs:
 
 ```bash
@@ -116,7 +126,7 @@ Useful options:
 | `--item <itemId>` | Analyze one item. Can be repeated. |
 | `--all` | Analyze all batches. |
 | `--limit <n>` | Limit selected rows after filtering. Useful for quick checks. |
-| `--visualize` | Write mask, match-box, and diff heatmap overlays. |
+| `--visualize` | Write mask, material, hole, match-box, and diff heatmap overlays. |
 | `--output-dir <path>` | Override the default local output root. |
 
 Default outputs:
@@ -126,21 +136,40 @@ data/product-checks/<batchId>/results.json
 data/product-checks/<batchId>/run-status.json
 data/product-checks/<batchId>/run.log
 data/product-checks/<batchId>/overlays/<itemId>-source-mask.png
+data/product-checks/<batchId>/overlays/<itemId>-material-mask.png
+data/product-checks/<batchId>/overlays/<itemId>-hole-mask.png
 data/product-checks/<batchId>/overlays/<itemId>-result-match.png
 data/product-checks/<batchId>/overlays/<itemId>-diff-heatmap.png
 ```
 
 For `--item <itemId>`, the default output path is `data/product-checks/<itemId>/results.json`. For `--all`, it is `data/product-checks/all-batches/results.json`.
 
-The result JSON includes item id, batch id, model, local cache paths, mask quality, bbox, metrics, suggested product-preservation score, confidence, issue tags, and overlay paths. It intentionally does not include prompt text, source URLs, result URLs, or optimization prompts.
+The result JSON includes item id, batch id, model, local cache paths, mask quality, bbox, layered metrics, `scoreVersion`, `scoreReasons`, `damageSignals`, suggested product-preservation score, confidence, issue tags, and overlay paths. It intentionally does not include prompt text, source URLs, result URLs, or optimization prompts.
 
 Current algorithm boundary:
 
 - Requires source and result images to have the same dimensions; otherwise returns `unsupported_size_mismatch`.
-- Segments the source product from a mostly white background with white-distance, HSV saturation, Canny edges, border flood fill, morphology, hole filling, and connected-component cleanup.
-- Computes masked image metrics: mean absolute difference, P90 difference, Lab delta, edge-band difference, SSIM, NCC, and local offset search around the source bbox.
-- Emits advisory tags such as `product_changed`, `product_moved`, `silhouette_damage`, `foreground_overlap`, and `artifact`.
+- Segments the source product into `materialMask`, `filledSilhouetteMask`, `holeMask`, and `contourBandMask`.
+- Treats high-confidence white/low-saturation enclosed areas as holes instead of product material. Hole background changes are not product damage; hole filling can cap the score at 2.
+- Computes layered metrics such as `materialMeanDiff`, `materialP90Diff`, `materialSsim`, `materialNcc`, `contourEdgeDiff`, `holeMeanDiff`, `holeClosureScore`, and `holeBoundaryDiff`.
+- Keeps legacy metric aliases such as `meanAbsDiff`, `p90AbsDiff`, `edgeBandDiff`, `ssim`, and `ncc` for frontend compatibility.
+- Converts related metrics into `damageSignals` for `alignment`, `material`, `geometry`, and `hole`; each signal has a `none`, `mild`, `moderate`, or `severe` severity.
+- Uses hard gates for protected-product movement, severe material mismatch, severe product damage, and hole filling. Clear protected-product movement is a score 1 failure.
+- Maps the worst confirmed damage severity to the score instead of stacking correlated penalties from `SSIM`, `NCC`, and contour metrics.
+- Does not let `contourEdgeDiff` / `edgeBandDiff` alone force a 2 score. Contour changes are supporting evidence unless material or match signals confirm product damage.
+- Keeps a guardrail that checked items without hard product-damage tags do not drop below 3, and low material diff with a strong match does not drop below 4.
+- Emits advisory tags such as `product_changed`, `product_moved`, `silhouette_damage`, `foreground_overlap`, `hole_filled`, and `artifact`.
 - Returns `suggestedScore: null` for unsupported cases instead of guessing.
+
+Product-preservation score semantics:
+
+| Score | Meaning |
+| --- | --- |
+| 5 | Product is materially stable; scene/background-only changes are acceptable. |
+| 4 | Mild product-adjacent evidence such as edge, shadow, or small structural drift, without confirmed product damage. |
+| 3 | Moderate material or geometry evidence that needs reviewer attention, but no hard failure. |
+| 2 | Confirmed severe product damage or hole filling. |
+| 1 | Protected product moved, or the material match is too poor to treat as the same product. |
 
 ## Local Access
 
