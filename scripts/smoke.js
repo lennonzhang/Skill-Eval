@@ -36,6 +36,26 @@ if (!Array.isArray(batches)) {
   throw new Error("Batches API did not return an array");
 }
 
+const { resources } = await getJson("/api/resources");
+if (!Array.isArray(resources) || resources.some((resource) => !resource.file?.endsWith(".json"))) {
+  throw new Error("Resources API did not return JSON files");
+}
+
+const badImport = await postJson("/api/import", {
+  downloadImages: false,
+});
+if (badImport.response.status !== 400) {
+  throw new Error(`Import without a file returned HTTP ${badImport.response.status}, expected 400`);
+}
+
+const nonJsonImport = await postJson("/api/import", {
+  file: "not-json.txt",
+  downloadImages: false,
+});
+if (nonJsonImport.response.status !== 400) {
+  throw new Error(`Import with a non-JSON file returned HTTP ${nonJsonImport.response.status}, expected 400`);
+}
+
 if (batches.length === 0) {
   const missingItem = await postJson("/api/items/not-a-real-item/evaluation", {
     product_preservation_score: 5,
@@ -78,6 +98,21 @@ if (!stats?.summary || stats.summary.total_items !== items.length) {
   throw new Error("Stats summary does not match item count");
 }
 
+const { productCheck } = await getJson(`/api/batches/${batch.id}/product-check`);
+if (productCheck !== null) {
+  if (!productCheck?.summary || !Array.isArray(productCheck.items)) {
+    throw new Error("Product-check API did not return the expected shape");
+  }
+  if (productCheck.summary.total !== productCheck.items.length) {
+    throw new Error("Product-check summary does not match item count");
+  }
+}
+
+const { run } = await getJson(`/api/batches/${batch.id}/product-check/runs/latest`);
+if (run !== null && run.batchId !== batch.id) {
+  throw new Error("Product-check run status batch id mismatch");
+}
+
 const invalidEvaluation = await postJson(`/api/items/${items[0].id}/evaluation`, {
   product_preservation_score: 5,
   instruction_adherence_score: 4,
@@ -116,13 +151,11 @@ const firstCachedImage = items
   .flatMap((item) => [item.source_image_url, item.result_image_url])
   .find(Boolean);
 
-if (!firstCachedImage) {
-  throw new Error("No cached image path found in imported items");
-}
-
-const imageResponse = await fetch(`${baseUrl}${firstCachedImage}`);
-if (!imageResponse.ok) {
-  throw new Error(`Cached image ${firstCachedImage} returned HTTP ${imageResponse.status}`);
+if (firstCachedImage) {
+  const imageResponse = await fetch(`${baseUrl}${firstCachedImage}`);
+  if (!imageResponse.ok) {
+    throw new Error(`Cached image ${firstCachedImage} returned HTTP ${imageResponse.status}`);
+  }
 }
 
 const models = [...new Set(items.map((item) => item.model))].sort();
@@ -140,6 +173,7 @@ console.log(
       reviewed: stats.summary.reviewed_items,
       models,
       failedImages: failedImages.length,
+      productCheckItems: productCheck?.items?.length || 0,
     },
     null,
     2

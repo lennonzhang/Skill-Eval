@@ -36,6 +36,8 @@ exports/
 output/
 outputs/
 reports/
+data/import-runs/
+data/product-checks/
 
 # SQLite runtime state.
 *.sqlite
@@ -49,7 +51,16 @@ node_modules/
 dist/
 .vite/
 .worktrees/
+.venv/
+
+# Python local build/cache outputs.
+__pycache__/
+*.py[cod]
 
 # Local environment files.
 .env
 .env.*
+docs/
+
+# Claude worktrees.
+.claude/worktrees/

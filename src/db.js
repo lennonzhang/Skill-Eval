@@ -31,11 +31,16 @@ export function initializeDatabase() {
   db = new DatabaseSync(databasePath);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  // Schema source of truth. Keep column intent here instead of a separate schema.sql:
+  // batches.source_file records the exact resource JSON basename for one-JSON-one-batch imports.
+  // items.raw_json_file/raw_index preserve traceability without storing external URLs in reports.
+  // evaluations stores human review only; automated Product Check remains advisory file output.
   db.exec(`
     CREATE TABLE IF NOT EXISTS batches (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       source_dir TEXT NOT NULL,
+      source_file TEXT,
       imported_at TEXT NOT NULL,
       item_count INTEGER NOT NULL DEFAULT 0,
       cached_source_count INTEGER NOT NULL DEFAULT 0,
@@ -65,9 +70,19 @@ export function initializeDatabase() {
     );
 
   `);
+  ensureBatchSchema();
   ensureEvaluationSchema();
 
   return db;
+}
+
+function ensureBatchSchema() {
+  const existing = db.prepare("PRAGMA table_info(batches)").all();
+  const existingColumns = existing.map((column) => column.name);
+  if (!existingColumns.includes("source_file")) {
+    // Backfill-compatible migration for databases created before one JSON became one batch.
+    db.exec("ALTER TABLE batches ADD COLUMN source_file TEXT");
+  }
 }
 
 function ensureEvaluationSchema() {
@@ -108,13 +123,13 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function createBatch({ id, name, sourceDir, importedAt, notes = "" }) {
+export function createBatch({ id, name, sourceDir, sourceFile = "", importedAt, notes = "" }) {
   getDatabase()
     .prepare(
-      `INSERT INTO batches (id, name, source_dir, imported_at, notes)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO batches (id, name, source_dir, source_file, imported_at, notes)
+       VALUES (?, ?, ?, ?, ?, ?)`
     )
-    .run(id, name, sourceDir, importedAt, notes);
+    .run(id, name, sourceDir, sourceFile, importedAt, notes);
 }
 
 export function insertItem(item) {

@@ -28,8 +28,11 @@ try {
     id: testBatchId,
     name: "Selftest synthetic batch",
     sourceDir: "selftest",
+    sourceFile: "selftest.json",
     importedAt: now,
   });
+  const testBatch = db.prepare("SELECT source_file FROM batches WHERE id = ?").get(testBatchId);
+  assert.equal(testBatch.source_file, "selftest.json");
   insertItem({
     id: testItemId,
     batchId: testBatchId,

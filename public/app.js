@@ -7,6 +7,8 @@ const translations = {
     "app.batch": "Batch",
     "actions.importResource": "Import Resource",
     "actions.importing": "Importing...",
+    "actions.runProductCheck": "Run Product Check",
+    "actions.runningProductCheck": "Running...",
     "actions.nextUnreviewed": "Next Unreviewed",
     "actions.close": "Close",
     "actions.saveReview": "Save Review",
@@ -51,6 +53,24 @@ const translations = {
     "review.tags": "Tags",
     "review.originalPrompt": "Original Prompt",
     "review.optimizedPrompt": "Optimized Prompt",
+    "productCheck.title": "Product Check",
+    "productCheck.none": "No product-check result for this batch.",
+    "productCheck.noItem": "No product-check result for this item.",
+    "productCheck.score": "Suggested Score",
+    "productCheck.confidence": "Confidence",
+    "productCheck.status": "Status",
+    "productCheck.unsupported": "Unsupported",
+    "productCheck.meanDiff": "Mean diff",
+    "productCheck.p90Diff": "P90 diff",
+    "productCheck.ssim": "SSIM",
+    "productCheck.ncc": "NCC",
+    "productCheck.offset": "Offset",
+    "productCheck.sourceMask": "Source mask",
+    "productCheck.resultMatch": "Result match",
+    "productCheck.diffHeatmap": "Diff heatmap",
+    "productCheck.runStatus": "Product Check",
+    "productCheck.notRun": "not run",
+    "resources.none": "No JSON files",
     "empty.initialTitle": "Select or import a batch",
     "empty.initialBody": "Use the batch menu or import local resource JSON to begin.",
     "empty.noBatch": "No batch loaded",
@@ -115,6 +135,8 @@ const translations = {
     "app.batch": "批次",
     "actions.importResource": "导入资源",
     "actions.importing": "导入中...",
+    "actions.runProductCheck": "运行产品检查",
+    "actions.runningProductCheck": "检查中...",
     "actions.nextUnreviewed": "下一个未评审",
     "actions.close": "关闭",
     "actions.saveReview": "保存评审",
@@ -159,6 +181,23 @@ const translations = {
     "review.tags": "标签",
     "review.originalPrompt": "原始提示词",
     "review.optimizedPrompt": "优化提示词",
+    "productCheck.title": "产品检查",
+    "productCheck.none": "当前批次还没有产品检查结果。",
+    "productCheck.noItem": "当前条目没有产品检查结果。",
+    "productCheck.score": "建议分",
+    "productCheck.confidence": "置信度",
+    "productCheck.status": "状态",
+    "productCheck.unsupported": "不支持原因",
+    "productCheck.meanDiff": "平均差异",
+    "productCheck.p90Diff": "P90 差异",
+    "productCheck.ssim": "SSIM",
+    "productCheck.ncc": "NCC",
+    "productCheck.offset": "偏移",
+    "productCheck.sourceMask": "原图蒙版",
+    "productCheck.resultMatch": "结果匹配",
+    "productCheck.diffHeatmap": "差异热图",
+    "productCheck.runStatus": "产品检查",
+    "productCheck.notRun": "未运行",
     "empty.initialTitle": "选择或导入批次",
     "empty.initialBody": "使用批次菜单，或导入本地 resource JSON 开始。",
     "empty.noBatch": "未加载批次",
@@ -216,6 +255,7 @@ const translations = {
     "status.reviewed": "已评审",
     "status.needs_recheck": "需复查",
     "status.failed": "失败",
+    "resources.none": "没有 JSON 文件",
   },
 };
 
@@ -228,9 +268,14 @@ function initialLanguage() {
 const state = {
   language: initialLanguage(),
   batches: [],
+  resources: [],
+  selectedResourceFile: "",
   selectedBatchId: "",
   items: [],
   stats: null,
+  productCheck: null,
+  productCheckRun: null,
+  productCheckPolling: null,
   selectedItemId: "",
   compareMode: "side-by-side",
   overlayOpacity: 55,
@@ -251,7 +296,9 @@ const els = {
   languageSelect: document.querySelector("#languageSelect"),
   batchMeta: document.querySelector("#batchMeta"),
   batchSelect: document.querySelector("#batchSelect"),
+  resourceSelect: document.querySelector("#resourceSelect"),
   importButton: document.querySelector("#importButton"),
+  runProductCheckButton: document.querySelector("#runProductCheckButton"),
   totalItems: document.querySelector("#totalItems"),
   reviewedItems: document.querySelector("#reviewedItems"),
   remainingItems: document.querySelector("#remainingItems"),
@@ -374,6 +421,20 @@ function renderBatchSelect() {
   els.batchSelect.value = state.selectedBatchId;
 }
 
+function renderResourceSelect() {
+  if (!state.resources.length) {
+    els.resourceSelect.innerHTML = `<option value="">${escapeHtml(t("resources.none"))}</option>`;
+    return;
+  }
+  els.resourceSelect.innerHTML = state.resources
+    .map((resource) => `<option value="${escapeHtml(resource.file)}">${escapeHtml(resource.file)}</option>`)
+    .join("");
+  if (!state.selectedResourceFile || !state.resources.some((resource) => resource.file === state.selectedResourceFile)) {
+    state.selectedResourceFile = state.resources[0].file;
+  }
+  els.resourceSelect.value = state.selectedResourceFile;
+}
+
 function renderMetrics() {
   const summary = state.stats?.summary || {};
   els.totalItems.textContent = summary.total_items || 0;
@@ -388,7 +449,13 @@ function renderMetrics() {
     return;
   }
   const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
-  els.batchMeta.textContent = `${batch.id} | ${imported}`;
+  const sourceFile = batch.source_file ? ` | ${batch.source_file}` : "";
+  const runStatus = state.productCheckRun?.status || (state.productCheck ? "succeeded" : t("productCheck.notRun"));
+  els.batchMeta.textContent = `${batch.id}${sourceFile} | ${imported} | ${t("productCheck.runStatus")}: ${runStatus}`;
+
+  els.runProductCheckButton.disabled = !state.selectedBatchId || state.productCheckRun?.status === "running";
+  els.runProductCheckButton.textContent =
+    state.productCheckRun?.status === "running" ? t("actions.runningProductCheck") : t("actions.runProductCheck");
 }
 
 function renderFilters() {
@@ -647,6 +714,84 @@ function selectedItem() {
   return state.items.find((candidate) => candidate.id === state.selectedItemId);
 }
 
+function selectedProductCheckItem(itemId) {
+  const items = state.productCheck?.items || [];
+  return items.find((candidate) => candidate.itemId === itemId);
+}
+
+function formatMetric(value) {
+  if (value === null || value === undefined || value === "") return "--";
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return String(value);
+}
+
+function productCheckImageHtml(productCheck, key, labelKey) {
+  const src = productCheck?.overlays?.[key];
+  if (!src) return "";
+  return `
+    <button class="product-check-image" type="button" data-product-check-full="${escapeHtml(src)}" aria-label="${escapeHtml(t(labelKey))}">
+      <img src="${escapeHtml(src)}" alt="${escapeHtml(t(labelKey))}" />
+      <span>${escapeHtml(t(labelKey))}</span>
+    </button>
+  `;
+}
+
+function renderProductCheck(item) {
+  if (!state.productCheck) {
+    return `
+      <section class="product-check-panel">
+        <h3>${escapeHtml(t("productCheck.title"))}</h3>
+        <p class="muted">${escapeHtml(t("productCheck.none"))}</p>
+      </section>
+    `;
+  }
+
+  const productCheck = selectedProductCheckItem(item.id);
+  if (!productCheck) {
+    return `
+      <section class="product-check-panel">
+        <h3>${escapeHtml(t("productCheck.title"))}</h3>
+        <p class="muted">${escapeHtml(t("productCheck.noItem"))}</p>
+      </section>
+    `;
+  }
+
+  const metrics = productCheck.metrics || {};
+  const bestOffset = metrics.bestOffset || {};
+  const tags = productCheck.tags || [];
+  const score = productCheck.suggestedScore ?? "N/A";
+  const unsupported = productCheck.unsupportedReason || "supported";
+
+  return `
+    <section class="product-check-panel">
+      <div class="product-check-head">
+        <h3>${escapeHtml(t("productCheck.title"))}</h3>
+        <div class="product-check-score">${escapeHtml(score)}</div>
+      </div>
+      <div class="product-check-summary">
+        <span>${escapeHtml(t("productCheck.status"))}: ${escapeHtml(productCheck.status)}</span>
+        <span>${escapeHtml(t("productCheck.confidence"))}: ${escapeHtml(productCheck.confidence)}</span>
+        <span>${escapeHtml(t("productCheck.unsupported"))}: ${escapeHtml(unsupported)}</span>
+      </div>
+      <div class="product-check-tags">
+        ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") || "<span>no-tags</span>"}
+      </div>
+      <div class="product-check-metrics">
+        <div><span>${escapeHtml(t("productCheck.meanDiff"))}</span><strong>${escapeHtml(formatMetric(metrics.meanAbsDiff))}</strong></div>
+        <div><span>${escapeHtml(t("productCheck.p90Diff"))}</span><strong>${escapeHtml(formatMetric(metrics.p90AbsDiff))}</strong></div>
+        <div><span>${escapeHtml(t("productCheck.ssim"))}</span><strong>${escapeHtml(formatMetric(metrics.ssim))}</strong></div>
+        <div><span>${escapeHtml(t("productCheck.ncc"))}</span><strong>${escapeHtml(formatMetric(metrics.ncc))}</strong></div>
+        <div><span>${escapeHtml(t("productCheck.offset"))}</span><strong>${escapeHtml(formatMetric(bestOffset.dx))}, ${escapeHtml(formatMetric(bestOffset.dy))}</strong></div>
+      </div>
+      <div class="product-check-images">
+        ${productCheckImageHtml(productCheck, "sourceMask", "productCheck.sourceMask")}
+        ${productCheckImageHtml(productCheck, "resultMatch", "productCheck.resultMatch")}
+        ${productCheckImageHtml(productCheck, "diffHeatmap", "productCheck.diffHeatmap")}
+      </div>
+    </section>
+  `;
+}
+
 function captureReviewDraft(itemId) {
   const formEl = document.querySelector("#evaluationForm");
   if (!formEl || !itemId) return;
@@ -701,6 +846,8 @@ function renderReviewPane() {
         </div>
 
         ${renderImageCompare(item)}
+
+        ${renderProductCheck(item)}
 
         <div class="prompt-grid">
           <div class="prompt-box">
@@ -840,6 +987,10 @@ function renderReviewPane() {
       state.imageLoadFailures[imageKey(itemId, kind)] = t("image.localLoadFailed");
       render();
     });
+  }
+
+  for (const button of els.reviewPane.querySelectorAll("[data-product-check-full]")) {
+    button.addEventListener("click", () => openImage(button.dataset.productCheckFull, button.textContent.trim()));
   }
 
   for (const button of els.reviewPane.querySelectorAll("[data-retry-image-kind]")) {
@@ -995,10 +1146,49 @@ async function loadBatches() {
   renderBatchSelect();
 }
 
+async function loadResources() {
+  const body = await api("/api/resources");
+  state.resources = body.resources;
+  renderResourceSelect();
+}
+
+async function loadProductCheckRun(batchId) {
+  if (!batchId) {
+    state.productCheckRun = null;
+    return;
+  }
+  const body = await api(`/api/batches/${batchId}/product-check/runs/latest`);
+  state.productCheckRun = body.run;
+}
+
+function startProductCheckPolling() {
+  if (state.productCheckPolling) {
+    clearInterval(state.productCheckPolling);
+    state.productCheckPolling = null;
+  }
+  if (state.productCheckRun?.status !== "running" || !state.selectedBatchId) return;
+  state.productCheckPolling = setInterval(async () => {
+    try {
+      await loadProductCheckRun(state.selectedBatchId);
+      if (state.productCheckRun?.status !== "running") {
+        clearInterval(state.productCheckPolling);
+        state.productCheckPolling = null;
+        const productCheckBody = await api(`/api/batches/${state.selectedBatchId}/product-check`);
+        state.productCheck = productCheckBody.productCheck;
+      }
+      render();
+    } catch (error) {
+      console.error(error);
+    }
+  }, 2000);
+}
+
 async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   if (!batchId) {
     state.items = [];
     state.stats = null;
+    state.productCheck = null;
+    state.productCheckRun = null;
     render();
     return;
   }
@@ -1013,12 +1203,16 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     els.statusFilter.value = "all";
   }
   const previousSelectedItemId = state.selectedItemId;
-  const [itemsBody, statsBody] = await Promise.all([
+  const [itemsBody, statsBody, productCheckBody, productCheckRunBody] = await Promise.all([
     api(`/api/batches/${batchId}/items`),
     api(`/api/batches/${batchId}/stats`),
+    api(`/api/batches/${batchId}/product-check`),
+    api(`/api/batches/${batchId}/product-check/runs/latest`),
   ]);
   state.items = itemsBody.items;
   state.stats = statsBody.stats;
+  state.productCheck = productCheckBody.productCheck;
+  state.productCheckRun = productCheckRunBody.run;
   const visible = filteredItems();
   state.selectedItemId =
     keepSelectedItemId && state.items.some((item) => item.id === keepSelectedItemId)
@@ -1028,12 +1222,14 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     resetOverlayState();
   }
   await loadBatches();
+  startProductCheckPolling();
   render();
 }
 
 function render() {
   applyStaticTranslations();
   renderBatchSelect();
+  renderResourceSelect();
   renderMetrics();
   renderFilters();
   renderItemList();
@@ -1042,18 +1238,41 @@ function render() {
 }
 
 async function importBatch() {
+  if (!state.selectedResourceFile) {
+    alert("Select a resource JSON file first.");
+    return;
+  }
   els.importButton.disabled = true;
   els.importButton.textContent = t("actions.importing");
   try {
     const body = await api("/api/import", {
       method: "POST",
-      body: JSON.stringify({ downloadImages: true }),
+      body: JSON.stringify({ file: state.selectedResourceFile, downloadImages: true }),
     });
     state.selectedBatchId = body.batch.id;
     await loadBatch(body.batch.id);
   } finally {
     els.importButton.disabled = false;
     els.importButton.textContent = t("actions.importResource");
+  }
+}
+
+async function runProductCheck() {
+  if (!state.selectedBatchId) return;
+  els.runProductCheckButton.disabled = true;
+  els.runProductCheckButton.textContent = t("actions.runningProductCheck");
+  try {
+    const body = await api(`/api/batches/${state.selectedBatchId}/product-check/runs`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.productCheckRun = body.run;
+    startProductCheckPolling();
+    render();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    renderMetrics();
   }
 }
 
@@ -1096,8 +1315,18 @@ els.languageSelect.addEventListener("change", () => {
   render();
 });
 
+els.resourceSelect.addEventListener("change", () => {
+  state.selectedResourceFile = els.resourceSelect.value;
+});
+
 els.importButton.addEventListener("click", () => {
   importBatch().catch((error) => {
+    alert(error.message);
+  });
+});
+
+els.runProductCheckButton.addEventListener("click", () => {
+  runProductCheck().catch((error) => {
     alert(error.message);
   });
 });
@@ -1134,6 +1363,7 @@ function showFatalError(error) {
   `;
 }
 
+await loadResources().catch(showFatalError);
 await loadBatches();
 if (state.selectedBatchId) {
   await loadBatch(state.selectedBatchId).catch(showFatalError);

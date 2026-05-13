@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const resourceDir = path.join(rootDir, "resource");
 const cacheDir = path.join(rootDir, "data", "cache");
+const importRunsDir = path.join(rootDir, "data", "import-runs");
 
 const IMAGE_EXTENSIONS = new Map([
   ["image/jpeg", ".jpg"],
@@ -181,11 +182,52 @@ export async function retryItemImage(itemId, kind) {
   };
 }
 
-async function readResourceRecords() {
+export function normalizeResourceFileName(file) {
+  const value = String(file || "").trim();
+  const name = path.basename(value);
+  if (!name || name !== value || path.isAbsolute(value) || value.includes("/") || value.includes("\\")) {
+    const error = new Error("Resource file must be a JSON file name in resource/");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!name.toLowerCase().endsWith(".json")) {
+    const error = new Error(`Resource file must be a JSON file: ${file}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return name;
+}
+
+export async function listResourceJsonFiles() {
   const files = (await readdir(resourceDir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+    .map(async (entry) => {
+      const fileStat = await stat(path.join(resourceDir, entry.name));
+      return {
+        file: entry.name,
+        size: fileStat.size,
+        mtime: fileStat.mtime.toISOString(),
+      };
+    });
+  return (await Promise.all(files)).sort((a, b) => a.file.localeCompare(b.file));
+}
+
+async function readResourceRecords({ files: selectedFiles = [] } = {}) {
+  let files = (await readdir(resourceDir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
     .map((entry) => entry.name)
     .sort();
+
+  if (selectedFiles.length > 0) {
+    const selected = new Set(selectedFiles.map(normalizeResourceFileName));
+    const missing = [...selected].filter((file) => !files.includes(file));
+    if (missing.length > 0) {
+      const error = new Error(`Resource file not found: ${missing.join(", ")}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    files = files.filter((file) => selected.has(file));
+  }
 
   const records = [];
   const errors = [];
@@ -218,19 +260,35 @@ async function readResourceRecords() {
   return { records, errors, files };
 }
 
-export async function importResourceBatch({ batchName, downloadImages = true } = {}) {
+async function writeImportRunSummary(batchId, summary) {
+  mkdirSync(importRunsDir, { recursive: true });
+  const filePath = path.join(importRunsDir, `${batchId}.json`);
+  await writeFile(filePath, JSON.stringify(summary, null, 2), "utf8");
+  return path.relative(rootDir, filePath);
+}
+
+export async function importResourceBatch({ batchName, downloadImages = true, files = [] } = {}) {
   initializeDatabase();
 
-  const { records, errors, files } = await readResourceRecords();
+  if (files.length !== 1) {
+    const error = new Error("Exactly one resource JSON file must be selected for import");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sourceFile = normalizeResourceFileName(files[0]);
+  const startedAt = nowIso();
+  const { records, errors, files: importedFiles } = await readResourceRecords({ files });
   const date = new Date();
   const batchId = batchIdForDate(date);
-  const name = batchName || `Resource import ${date.toLocaleString("sv-SE")}`;
+  const name = batchName || sourceFile;
   const importedAt = date.toISOString();
 
   createBatch({
     id: batchId,
     name,
     sourceDir: "resource",
+    sourceFile,
     importedAt,
   });
 
@@ -313,14 +371,15 @@ export async function importResourceBatch({ batchName, downloadImages = true } =
 
   updateBatchCounts(batchId);
 
-  return {
+  const result = {
     batch: {
       id: batchId,
       name,
       importedAt,
       sourceDir: "resource",
+      sourceFile,
     },
-    files,
+    files: importedFiles,
     parsed: records.length,
     inserted,
     duplicate,
@@ -333,4 +392,21 @@ export async function importResourceBatch({ batchName, downloadImages = true } =
       return acc;
     }, {}),
   };
+
+  result.importRun = await writeImportRunSummary(batchId, {
+    batchId,
+    sourceFile,
+    startedAt,
+    finishedAt: nowIso(),
+    parsed: result.parsed,
+    inserted,
+    duplicate,
+    cachedSource,
+    cachedResult,
+    errors,
+    cacheDir: result.cacheDir,
+    modelCounts: result.modelCounts,
+  });
+
+  return result;
 }
