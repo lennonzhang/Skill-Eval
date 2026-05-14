@@ -71,6 +71,17 @@
         <button id="nextUnreviewedButton" type="button" data-i18n="actions.nextUnreviewed">Next Unreviewed</button>
       </section>
 
+      <aside class="stats-panel stats-strip" aria-label="Model statistics" data-i18n-aria-label="stats.aria">
+        <div class="stats-block model-stats-block">
+          <h2 data-i18n="stats.modelScores">Model Scores</h2>
+          <div id="modelStats" class="model-stats-row"></div>
+        </div>
+        <div class="stats-block tag-stats-block">
+          <h2 data-i18n="stats.issueTags">Issue Tags</h2>
+          <div id="tagStats" class="tag-stats-row"></div>
+        </div>
+      </aside>
+
       <section class="workspace">
         <aside class="queue" aria-label="Items" data-i18n-aria-label="queue.aria">
           <div class="queue-header">
@@ -86,17 +97,6 @@
             <p data-i18n="empty.initialBody">Use the batch menu or import local resource JSON to begin.</p>
           </div>
         </section>
-
-        <aside class="stats-panel" aria-label="Model statistics" data-i18n-aria-label="stats.aria">
-          <div class="stats-block">
-            <h2 data-i18n="stats.modelScores">Model Scores</h2>
-            <div id="modelStats"></div>
-          </div>
-          <div class="stats-block">
-            <h2 data-i18n="stats.issueTags">Issue Tags</h2>
-            <div id="tagStats"></div>
-          </div>
-        </aside>
       </section>
     </main>
 
