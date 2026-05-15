@@ -31,6 +31,13 @@ const IMAGE_EXTENSIONS = new Map([
   ["image/avif", ".avif"],
 ]);
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const DEFAULT_CACHE_WORKERS = 4;
+
+export function normalizeWorkerCount(value, fallback = DEFAULT_CACHE_WORKERS) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.floor(parsed));
+}
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -174,7 +181,7 @@ export async function cacheImage({ url, batchId, itemId, kind }) {
   return relativePath;
 }
 
-export async function cacheBrowserUploadedImage({ itemId, kind, buffer, contentType }) {
+export async function cacheBrowserUploadedImage({ itemId, kind, buffer, contentType, updateCounts = false }) {
   initializeDatabase();
 
   if (!["source", "result"].includes(kind)) {
@@ -220,7 +227,9 @@ export async function cacheBrowserUploadedImage({ itemId, kind, buffer, contentT
     fetchStatus: "success",
     fetchError: null,
   });
-  updateBatchCounts(item.batch_id);
+  if (updateCounts) {
+    updateBatchCounts(item.batch_id);
+  }
 
   return {
     itemId,
@@ -369,7 +378,88 @@ async function writeImportRunSummary(batchId, summary) {
   return path.relative(rootDir, filePath);
 }
 
-export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress } = {}) {
+async function cacheRecordImages({ record, batchId, itemId, itemIndex, total, downloadImages, onProgress }) {
+  const patch = {
+    sourceImagePath: null,
+    resultImagePath: null,
+    sourceFetchStatus: downloadImages ? "pending" : "skipped",
+    resultFetchStatus: downloadImages ? "pending" : "skipped",
+    sourceFetchError: null,
+    resultFetchError: null,
+  };
+
+  if (!downloadImages) {
+    return patch;
+  }
+
+  async function cacheKind(kind, url) {
+    emitProgress(onProgress, {
+      type: "import:image-start",
+      batchId,
+      itemId,
+      index: itemIndex,
+      total,
+      model: record.model,
+      imageKind: kind,
+    });
+    try {
+      const imagePath = await cacheImage({
+        url,
+        batchId,
+        itemId,
+        kind,
+      });
+      emitProgress(onProgress, {
+        type: "import:image-finish",
+        batchId,
+        itemId,
+        index: itemIndex,
+        total,
+        model: record.model,
+        imageKind: kind,
+        imageStatus: "success",
+      });
+      return imagePath;
+    } catch (error) {
+      emitProgress(onProgress, {
+        type: "import:image-finish",
+        batchId,
+        itemId,
+        index: itemIndex,
+        total,
+        model: record.model,
+        imageKind: kind,
+        imageStatus: "failed",
+      });
+      throw error;
+    }
+  }
+
+  const [sourceResult, resultResult] = await Promise.allSettled([
+    cacheKind("source", record.url),
+    cacheKind("result", record.resultUrl),
+  ]);
+
+  if (sourceResult.status === "fulfilled") {
+    patch.sourceImagePath = sourceResult.value;
+    patch.sourceFetchStatus = "success";
+  } else {
+    patch.sourceFetchStatus = "failed";
+    patch.sourceFetchError = sourceResult.reason instanceof Error ? sourceResult.reason.message : String(sourceResult.reason);
+  }
+
+  if (resultResult.status === "fulfilled") {
+    patch.resultImagePath = resultResult.value;
+    patch.resultFetchStatus = "success";
+  } else {
+    patch.resultFetchStatus = "failed";
+    patch.resultFetchError = resultResult.reason instanceof Error ? resultResult.reason.message : String(resultResult.reason);
+  }
+
+  return patch;
+}
+
+export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress, cacheWorkers } = {}) {
   initializeDatabase();
 
   if (files.length !== 1) {
@@ -411,8 +501,10 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   let cachedSource = 0;
   let cachedResult = 0;
   let processed = 0;
+  const workerCount = normalizeWorkerCount(cacheWorkers ?? process.env.SKILL_EVAL_CACHE_WORKERS);
+  const insertedRecords = [];
 
-  for (const record of records) {
+  for (const [recordIndex, record] of records.entries()) {
     const itemId = `item-${hash(`${batchId}\n${record.importKey}\n${record.rawJsonFile}\n${record.rawIndex}`)}`;
     const createdAt = nowIso();
     const baseItem = {
@@ -454,75 +546,71 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
       continue;
     }
     inserted += 1;
+    insertedRecords.push({
+      itemId,
+      record,
+      itemIndex: recordIndex + 1,
+    });
+  }
 
-    if (!downloadImages) {
-      processed += 1;
-      emitProgress(onProgress, {
-        type: "import:item",
-        batchId,
-        itemId,
-        model: record.model,
-        index: processed,
-        total: records.length,
-        inserted,
-        duplicate,
-        sourceStatus: "skipped",
-        resultStatus: "skipped",
-      });
-      continue;
-    }
-
-    const patch = {
-      sourceImagePath: null,
-      resultImagePath: null,
-      sourceFetchStatus: "pending",
-      resultFetchStatus: "pending",
-      sourceFetchError: null,
-      resultFetchError: null,
-    };
-
-    try {
-      patch.sourceImagePath = await cacheImage({
-        url: record.url,
-        batchId,
-        itemId,
-        kind: "source",
-      });
-      patch.sourceFetchStatus = "success";
-      cachedSource += 1;
-    } catch (error) {
-      patch.sourceFetchStatus = "failed";
-      patch.sourceFetchError = error instanceof Error ? error.message : String(error);
-    }
-
-    try {
-      patch.resultImagePath = await cacheImage({
-        url: record.resultUrl,
-        batchId,
-        itemId,
-        kind: "result",
-      });
-      patch.resultFetchStatus = "success";
-      cachedResult += 1;
-    } catch (error) {
-      patch.resultFetchStatus = "failed";
-      patch.resultFetchError = error instanceof Error ? error.message : String(error);
-    }
-
-    updateItemCacheStatus(itemId, patch);
+  async function finishInsertedRecord(entry) {
+    emitProgress(onProgress, {
+      type: "import:cache-start",
+      batchId,
+      itemId: entry.itemId,
+      model: entry.record.model,
+      index: entry.itemIndex,
+      completed: processed,
+      total: records.length,
+      inserted,
+      duplicate,
+      cachedSource,
+      cachedResult,
+    });
+    const patch = await cacheRecordImages({
+      record: entry.record,
+      batchId,
+      itemId: entry.itemId,
+      itemIndex: entry.itemIndex,
+      total: records.length,
+      downloadImages,
+      onProgress,
+    });
+    updateItemCacheStatus(entry.itemId, patch);
+    cachedSource += patch.sourceFetchStatus === "success" ? 1 : 0;
+    cachedResult += patch.resultFetchStatus === "success" ? 1 : 0;
     processed += 1;
     emitProgress(onProgress, {
       type: "import:item",
       batchId,
-      itemId,
-      model: record.model,
+      itemId: entry.itemId,
+      model: entry.record.model,
       index: processed,
       total: records.length,
       inserted,
       duplicate,
+      cachedSource,
+      cachedResult,
       sourceStatus: patch.sourceFetchStatus,
       resultStatus: patch.resultFetchStatus,
     });
+  }
+
+  if (workerCount === 1 || insertedRecords.length <= 1) {
+    for (const entry of insertedRecords) {
+      await finishInsertedRecord(entry);
+    }
+  } else {
+    const queue = [...insertedRecords];
+    const workers = Array.from({ length: Math.min(workerCount, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const entry = queue.shift();
+        if (entry) {
+          await finishInsertedRecord(entry);
+        }
+      }
+    });
+    await Promise.all(workers);
   }
 
   updateBatchCounts(batchId);

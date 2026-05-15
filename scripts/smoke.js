@@ -130,6 +130,14 @@ if (!stats?.summary || stats.summary.total_items !== items.length) {
   throw new Error("Stats summary does not match item count");
 }
 
+const recomputeCounts = await postJson(`/api/batches/${batch.id}/cache-counts/recompute`, {});
+if (recomputeCounts.response.status !== 200 || recomputeCounts.payload.batchId !== batch.id) {
+  throw new Error(`Cache-count recompute returned HTTP ${recomputeCounts.response.status}, expected 200`);
+}
+if (recomputeCounts.payload.stats?.summary?.total_items !== items.length) {
+  throw new Error("Cache-count recompute stats did not match item count");
+}
+
 const { productCheck } = await getJson(`/api/batches/${batch.id}/product-check`);
 if (productCheck !== null) {
   if (!productCheck?.summary || !Array.isArray(productCheck.items)) {

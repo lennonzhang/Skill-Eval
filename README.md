@@ -69,7 +69,8 @@ Preferred local setting:
 ```powershell
 $env:SKILL_EVAL_FETCH_PROXY="http://127.0.0.1:<proxy-port>"
 $env:SKILL_EVAL_FETCH_TIMEOUT_MS="180000"
-pnpm run import:resource -- --file=<resource-file>.json
+$env:SKILL_EVAL_CACHE_WORKERS="4"
+pnpm run import:resource -- --file=<resource-file>.json --cache-workers=4
 ```
 
 Notes:
@@ -79,8 +80,9 @@ Notes:
 - `NO_PROXY` is respected for environment proxies. Explicit `SKILL_EVAL_FETCH_PROXY` is still allowed because it is intended as a per-project override.
 - Browser VPN extensions do not automatically apply to Node. The extension must expose a local HTTP proxy port, or the terminal import process still cannot use that route.
 - Cache failures are stored per image in SQLite as `source_fetch_error` or `result_fetch_error` and include the attempted path, such as direct fetch or proxy fetch.
+- Image caching uses a bounded worker pool. `SKILL_EVAL_CACHE_WORKERS` or `--cache-workers=<n>` controls how many item cache jobs run at once; use `1` for serial troubleshooting.
 - In the review UI, failed images also have a Browser Cache fallback. If the current browser can read the remote image through its extension/VPN path and the remote host allows page fetch access, the page uploads the image blob back to the local server. The server persists it under `data/cache/` and updates SQLite, so the cache is available after refresh and for Product Check.
-- When a batch is opened, the UI automatically attempts Browser Cache once per failed source/result image in the current browser session. It runs with small concurrency and does not retry the same failed image repeatedly until the page is reloaded.
+- When a batch is opened, the UI automatically attempts Browser Cache once per failed source/result image in the current browser session. It runs with small concurrency, updates only the task progress strip while running, and recomputes batch cache counts once after a successful batch of browser uploads.
 
 ## Task Progress
 
@@ -99,6 +101,8 @@ GET /api/tasks/latest?type=import
 
 Task snapshots are written under `data/task-runs/`. They do not include prompt text, source URLs, result URLs, or optimization prompts. Final business state remains in SQLite, `data/cache/`, `data/import-runs/`, and `data/product-checks/`.
 
+Running task snapshots are throttled to reduce local disk churn on large batches. `SKILL_EVAL_TASK_FLUSH_MS` controls the flush interval and defaults to `250`; final success or failure states are always flushed immediately.
+
 ## Batch Import
 
 One JSON file is one batch. The review UI lists `resource/*.json`; choose one file and click Import Resource. The API only accepts a JSON basename from `resource/`, not a directory, subpath, or absolute path.
@@ -112,6 +116,8 @@ data/import-runs/<batchId>.json
 The import summary includes counts, cache success/failure totals, and parse errors. It intentionally does not include prompt text, source URLs, result URLs, or optimization prompts.
 
 During import, `pnpm run import:resource` emits JSONL progress to the terminal and waits for completion. In the review UI, Import Resource starts a background local-server task and the page polls task progress until the batch is ready. The events include the selected resource filename, batch id, item id, model, processed count, insert/duplicate counts, and source/result cache status. They do not print prompt text or remote URLs.
+
+Import cache concurrency is intentionally bounded. Source/result images for inserted items are cached through a local worker queue, and each item is updated once after both image attempts finish. Use `--cache-workers=1` when debugging a proxy, remote host throttling, or a single problematic image.
 
 ## Product Consistency Check
 
@@ -167,6 +173,9 @@ Useful options:
 | `--limit <n>` | Limit selected rows after filtering. Useful for quick checks. |
 | `--visualize` | Write mask, material, hole, match-box, and diff heatmap overlays. |
 | `--output-dir <path>` | Override the default local output root. |
+| `--workers <n>` | Run item checks concurrently. Use `1` for serial execution. |
+
+The review server passes `PRODUCT_CHECK_WORKERS` to Product Check and defaults to `4`. CLI runs default to `min(4, os.cpu_count())`. Results are written in the original item order even when worker completion order differs.
 
 Default outputs:
 

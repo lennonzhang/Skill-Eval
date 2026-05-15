@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from product_check import ROOT_DIR, analyze_pair, write_visualizations
+from product_check import ROOT_DIR, analyze_pair, analyze_rows, write_visualizations
 
 
 SELFTEST_DIR = ROOT_DIR / "data" / "product-checks" / "selftest"
@@ -19,6 +20,29 @@ SELFTEST_DIR = ROOT_DIR / "data" / "product-checks" / "selftest"
 def assert_true(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def make_row(**overrides: object) -> sqlite3.Row:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    columns = {
+        "id": "selftest-item",
+        "batch_id": "selftest-batch",
+        "model": "selftest-model",
+        "source_image_path": None,
+        "result_image_path": None,
+        "source_fetch_status": "failed",
+        "result_fetch_status": "failed",
+    }
+    columns.update(overrides)
+    names = list(columns.keys())
+    selectors = ", ".join(f"? AS {name}" for name in names)
+    row = connection.execute(
+        f"SELECT {selectors}",
+        [columns[name] for name in names],
+    ).fetchone()
+    connection.close()
+    return row
 
 
 def canvas(width: int = 256, height: int = 256) -> np.ndarray:
@@ -565,10 +589,25 @@ def main() -> int:
         path = ROOT_DIR / path_value
         assert_true(path.exists(), f"overlay missing: {path_value}")
 
+    rows = [
+        make_row(id="parallel-selftest-1"),
+        make_row(id="parallel-selftest-2"),
+        make_row(id="parallel-selftest-3"),
+    ]
+    serial_items = analyze_rows(rows, SELFTEST_DIR / "parallel-serial", False, 1)
+    parallel_items = analyze_rows(rows, SELFTEST_DIR / "parallel-workers", False, 2)
+    assert_true([item["itemId"] for item in serial_items] == [row["id"] for row in rows], "serial row order should be stable")
+    assert_true(
+        [item["itemId"] for item in parallel_items] == [row["id"] for row in rows],
+        "parallel row order should be stable",
+    )
+    assert_true(len(parallel_items) == 3, "parallel product-check should return every item")
+
     payload = {
         "ok": True,
         "cases": cases,
         "overlays": overlays,
+        "parallelItems": [item["itemId"] for item in parallel_items],
     }
     (SELFTEST_DIR / "results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))

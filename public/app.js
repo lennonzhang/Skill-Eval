@@ -27,6 +27,8 @@ const translations = {
     "task.partial": "Partial",
     "task.progress": "{done}/{total}",
     "task.importSummary": "inserted {inserted} · source {cachedSource} · result {cachedResult} · failed {failed}",
+    "task.importActive": "Caching item {index}: {kind} {status}",
+    "task.importActiveItem": "Caching item {index}",
     "task.productCheckSummary": "checked {checked} · unsupported {unsupported} · failed {failed}",
     "task.browserCacheSummary": "recovered {success} · failed {failed}",
     "metrics.aria": "Batch statistics",
@@ -172,6 +174,8 @@ const translations = {
     "task.partial": "部分完成",
     "task.progress": "{done}/{total}",
     "task.importSummary": "新增 {inserted} · 原图 {cachedSource} · 结果 {cachedResult} · 失败 {failed}",
+    "task.importActive": "正在缓存第 {index} 条：{kind} {status}",
+    "task.importActiveItem": "正在缓存第 {index} 条",
     "task.productCheckSummary": "已检查 {checked} · 不支持 {unsupported} · 失败 {failed}",
     "task.browserCacheSummary": "恢复 {success} · 失败 {failed}",
     "metrics.aria": "批次统计",
@@ -312,6 +316,7 @@ const state = {
   productCheckPolling: null,
   importTask: null,
   importTaskPolling: null,
+  taskProgressRenderTimer: null,
   selectedItemId: "",
   compareMode: "side-by-side",
   overlayOpacity: 55,
@@ -535,6 +540,21 @@ function importTaskSummary(task) {
   });
 }
 
+function importTaskMessage(task) {
+  const summary = task.summary || {};
+  if (task.status === "running" && summary.activeItemIndex) {
+    if (summary.activeImageKind) {
+      return t("task.importActive", {
+        index: summary.activeItemIndex,
+        kind: t(`image.${summary.activeImageKind}`),
+        status: t(`fetch.${summary.activeImageStatus || "pending"}`),
+      });
+    }
+    return t("task.importActiveItem", { index: summary.activeItemIndex });
+  }
+  return task.error || task.message || task.latestMessage || importTaskSummary(task);
+}
+
 function productCheckTaskSummary(run) {
   const summary = run.summary || {};
   return t("task.productCheckSummary", {
@@ -587,7 +607,7 @@ function renderTaskProgress() {
       const status = normalizeTaskStatus(task.status);
       const done = taskDone(task);
       const total = taskTotal(task);
-      const message = task.error || task.message || task.latestMessage || taskSummary(task);
+      const message = task.type === "import" ? importTaskMessage(task) : task.error || task.message || task.latestMessage || taskSummary(task);
       return `
         <article class="task-card ${escapeHtml(status)}">
           <div class="task-card-head">
@@ -606,6 +626,14 @@ function renderTaskProgress() {
       `;
     })
     .join("");
+}
+
+function scheduleTaskProgressRender() {
+  if (state.taskProgressRenderTimer) return;
+  state.taskProgressRenderTimer = setTimeout(() => {
+    state.taskProgressRenderTimer = null;
+    renderTaskProgress();
+  }, 150);
 }
 
 function renderFilters() {
@@ -1337,7 +1365,7 @@ async function runBrowserCacheWorker(queue, run) {
     const candidate = queue.shift();
     state.autoBrowserCacheAttempted.add(candidate.key);
     state.browserCachingImages.add(candidate.key);
-    render();
+    scheduleTaskProgressRender();
     try {
       await browserCacheImageRequest(candidate.item, candidate.kind);
       delete state.imageLoadFailures[candidate.key];
@@ -1349,7 +1377,7 @@ async function runBrowserCacheWorker(queue, run) {
     } finally {
       run.done += 1;
       state.browserCachingImages.delete(candidate.key);
-      render();
+      scheduleTaskProgressRender();
     }
   }
 }
@@ -1368,14 +1396,15 @@ async function startAutoBrowserCache(batchId) {
     failed: 0,
   };
   state.autoBrowserCacheRun = run;
-  render();
+  renderTaskProgress();
 
   const concurrency = Math.min(2, queue.length);
   await Promise.all(Array.from({ length: concurrency }, () => runBrowserCacheWorker(queue, run)));
   if (run !== state.autoBrowserCacheRun) return;
   run.status = "finished";
-  render();
+  renderTaskProgress();
   if (run.success > 0 && state.selectedBatchId === batchId) {
+    await recomputeCacheCounts(batchId);
     await loadBatch(batchId, state.selectedItemId, { skipAutoBrowserCache: true });
   }
 }
@@ -1421,6 +1450,14 @@ async function browserCacheImageRequest(item, kind) {
   return body.retry;
 }
 
+async function recomputeCacheCounts(batchId) {
+  if (!batchId) return null;
+  return api(`/api/batches/${encodeURIComponent(batchId)}/cache-counts/recompute`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 async function cacheImageFromBrowser(itemId, kind) {
   const item = state.items.find((candidate) => candidate.id === itemId);
   if (!item) throw new Error("Item not found");
@@ -1431,6 +1468,7 @@ async function cacheImageFromBrowser(itemId, kind) {
   render();
   try {
     await browserCacheImageRequest(item, kind);
+    await recomputeCacheCounts(state.selectedBatchId);
     delete state.imageLoadFailures[key];
     delete state.imageSizes[itemId];
     await loadBatch(state.selectedBatchId, itemId, { skipAutoBrowserCache: true });

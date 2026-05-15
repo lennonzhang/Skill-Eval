@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { importResourceBatch } from "../src/importer.js";
 import {
   createBatch,
   getBatchStats,
@@ -13,13 +17,16 @@ import {
   updateSingleImageCacheStatus,
 } from "../src/db.js";
 import { fetchBinaryWithFallbacks, getConfiguredFetchProxies, getFetchTimeoutMs } from "../src/image-fetch.js";
-import { createTask, finishTask, getLatestTask, getTask, updateTask } from "../src/tasks.js";
+import { createTask, finishTask, flushAllTasks, getLatestTask, getTask, updateTask } from "../src/tasks.js";
 import { calculateOverallScore, EvaluationValidationError, validateEvaluationInput } from "../public/scoring.js";
 
 const db = getDatabase();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.resolve(__dirname, "..");
 const testBatchId = `selftest-batch-${randomUUID()}`;
 const testItemId = `selftest-item-${randomUUID()}`;
 const now = new Date().toISOString();
+const importProgressEvents = [];
 const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
   "base64"
@@ -250,6 +257,51 @@ assert.equal(afterRollback.reviewed_items, 0);
 
 await runFetchProxySelftest();
 
+const selftestResourceFile = `selftest-import-${randomUUID()}.json`;
+const selftestResourcePath = path.join(rootDir, "resource", selftestResourceFile);
+let selftestImportRunPath = "";
+mkdirSync(path.dirname(selftestResourcePath), { recursive: true });
+writeFileSync(
+  selftestResourcePath,
+  JSON.stringify([
+    {
+      model: "selftest-model",
+      text: "selftest prompt 1",
+      url: "https://example.test/source-1.png",
+      optimizationPrompt: "selftest optimized 1",
+      resultUrl: "https://example.test/result-1.png",
+    },
+    {
+      model: "selftest-model",
+      text: "selftest prompt 2",
+      url: "https://example.test/source-2.png",
+      optimizationPrompt: "selftest optimized 2",
+      resultUrl: "https://example.test/result-2.png",
+    },
+  ]),
+  "utf8"
+);
+db.exec("BEGIN");
+try {
+  const importResult = await importResourceBatch({
+    batchName: "Selftest no-images import",
+    downloadImages: false,
+    files: [selftestResourceFile],
+    cacheWorkers: 2,
+    onProgress: (event) => importProgressEvents.push(event),
+  });
+  selftestImportRunPath = path.join(rootDir, importResult.importRun);
+  assert.equal(importResult.parsed, 2);
+  assert.equal(importProgressEvents.some((event) => event.type === "import:cache-start"), true);
+  assert.equal(importProgressEvents.filter((event) => event.type === "import:item").length, 2);
+  assert.equal(importProgressEvents.at(-1)?.type, "import:finish");
+  assert.equal(importProgressEvents.at(-1)?.cachedSource, 0);
+} finally {
+  db.exec("ROLLBACK");
+  if (existsSync(selftestResourcePath)) unlinkSync(selftestResourcePath);
+  if (selftestImportRunPath && existsSync(selftestImportRunPath)) unlinkSync(selftestImportRunPath);
+}
+
 const task = createTask("selftest", {
   batchId: testBatchId,
   status: "queued",
@@ -266,15 +318,25 @@ let updatedTask = getTask(task.id);
 assert.equal(updatedTask.status, "running");
 assert.equal(updatedTask.done, 1);
 assert.equal(updatedTask.summary.inserted, 1);
-finishTask(task.id, "succeeded", {
+updateTask(task.id, {
+  status: "running",
   done: 2,
-  total: 2,
+  total: 3,
   summary: { inserted: 2 },
+});
+flushAllTasks();
+updatedTask = getLatestTask({ type: "selftest", batchId: testBatchId });
+assert.equal(updatedTask.done, 2);
+assert.equal(updatedTask.total, 3);
+finishTask(task.id, "succeeded", {
+  done: 3,
+  total: 3,
+  summary: { inserted: 3 },
 });
 updatedTask = getLatestTask({ type: "selftest", batchId: testBatchId });
 assert.equal(updatedTask.id, task.id);
 assert.equal(updatedTask.status, "succeeded");
-assert.equal(updatedTask.done, 2);
+assert.equal(updatedTask.done, 3);
 
 console.log(
   JSON.stringify(

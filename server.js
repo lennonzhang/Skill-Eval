@@ -12,6 +12,7 @@ import {
   initializeDatabase,
   itemExists,
   saveEvaluation,
+  updateBatchCounts,
 } from "./src/db.js";
 import {
   cacheBrowserUploadedImage,
@@ -29,6 +30,8 @@ const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const productChecksDir = path.join(dataDir, "product-checks");
 const port = Number(process.env.PORT || 4173);
+const productCheckWorkers = Math.max(1, Math.floor(Number(process.env.PRODUCT_CHECK_WORKERS || 4)) || 4);
+const importCacheWorkers = Math.max(1, Math.floor(Number(process.env.SKILL_EVAL_CACHE_WORKERS || 4)) || 4);
 const productCheckJobs = new Map();
 const productCheckBuffers = new Map();
 
@@ -262,6 +265,53 @@ function importProgressPatch(event) {
         latestItemId: event.itemId,
         latestSourceStatus: event.sourceStatus,
         latestResultStatus: event.resultStatus,
+        activeItemIndex: null,
+        activeItemId: null,
+        activeImageKind: null,
+        activeImageStatus: null,
+      },
+    };
+  }
+  if (event.type === "import:cache-start") {
+    return {
+      status: "running",
+      batchId: event.batchId,
+      done: event.completed || 0,
+      total: event.total || 0,
+      message: `Caching item ${event.index || 0}/${event.total || 0}`,
+      summary: {
+        ...summary,
+        latestItemId: event.itemId,
+        activeItemIndex: event.index || null,
+        activeItemId: event.itemId,
+        activeImageKind: null,
+        activeImageStatus: "pending",
+      },
+    };
+  }
+  if (event.type === "import:image-start" || event.type === "import:image-finish") {
+    const activeSummary =
+      event.type === "import:image-start"
+        ? {
+            activeItemIndex: event.index || null,
+            activeItemId: event.itemId,
+            activeImageKind: event.imageKind || null,
+            activeImageStatus: "pending",
+          }
+        : {};
+    return {
+      status: "running",
+      batchId: event.batchId,
+      message:
+        event.type === "import:image-start"
+          ? `Caching ${event.imageKind || "image"} image`
+          : `${event.imageKind || "image"} image ${event.imageStatus || "finished"}`,
+      summary: {
+        ...summary,
+        latestItemId: event.itemId,
+        latestImageKind: event.imageKind || null,
+        latestImageStatus: event.type === "import:image-start" ? "pending" : event.imageStatus || "finished",
+        ...activeSummary,
       },
     };
   }
@@ -322,6 +372,7 @@ function startImportTask({ body }) {
     try {
       const result = await importResourceBatch({
         batchName: body.name,
+        cacheWorkers: body.cacheWorkers || importCacheWorkers,
         downloadImages: body.downloadImages !== false,
         files: sourceFile ? [sourceFile] : [],
         onProgress: (event) => {
@@ -432,6 +483,7 @@ function updateProductCheckStatusFromEvent(batchId, payload) {
     next.failed = 0;
     next.latestMessage = `Selected ${next.total} item(s)`;
     next.outputDir = payload.outputDir || next.outputDir || null;
+    next.workers = payload.workers || next.workers || null;
     next.summary = productCheckSummaryFromStatus(next);
   } else if (payload.event === "product-check:item") {
     const isChecked = payload.status === "checked";
@@ -440,6 +492,7 @@ function updateProductCheckStatusFromEvent(batchId, payload) {
     next.done = payload.index || (current.done || 0) + 1;
     next.total = payload.total || current.total || 0;
     next.currentIndex = payload.index || next.done;
+    next.currentItemOrder = payload.itemOrder || null;
     next.currentItemId = payload.itemId || null;
     next.latestMessage = `${payload.status || "item"} ${next.done}/${next.total}`;
     next.checked = (current.checked || 0) + (isChecked ? 1 : 0);
@@ -521,7 +574,15 @@ async function startProductCheckRun(batchId) {
 
   const child = spawn(
     process.execPath,
-    ["scripts/run-python.js", "scripts/product_check.py", "--batch", batchId, "--visualize"],
+    [
+      "scripts/run-python.js",
+      "scripts/product_check.py",
+      "--batch",
+      batchId,
+      "--visualize",
+      "--workers",
+      String(productCheckWorkers),
+    ],
     {
       cwd: __dirname,
       windowsHide: true,
@@ -691,6 +752,18 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && productCheckRunLatestMatch) {
     const batchId = productCheckRunLatestMatch[1];
     sendJson(res, 200, { run: await readProductCheckStatus(batchId) });
+    return;
+  }
+
+  const cacheCountsMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/cache-counts\/recompute$/);
+  if (req.method === "POST" && cacheCountsMatch) {
+    const batchId = cacheCountsMatch[1];
+    if (!getBatches().some((batch) => batch.id === batchId)) {
+      sendError(res, 404, "Batch not found");
+      return;
+    }
+    updateBatchCounts(batchId);
+    sendJson(res, 200, { batchId, stats: getBatchStats(batchId) });
     return;
   }
 

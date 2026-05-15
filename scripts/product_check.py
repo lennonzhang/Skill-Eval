@@ -14,6 +14,7 @@ import math
 import os
 import sqlite3
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1318,6 +1319,78 @@ def default_output_key(filters: dict[str, Any]) -> str:
     return "selected-items"
 
 
+def default_worker_count() -> int:
+    return max(1, min(4, os.cpu_count() or 1))
+
+
+def normalize_worker_count(value: int | None) -> int:
+    if value is None:
+        return default_worker_count()
+    return max(1, int(value))
+
+
+def analyze_rows(
+    rows: list[sqlite3.Row],
+    output_dir: Path,
+    visualize: bool,
+    workers: int,
+) -> list[dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return []
+
+    worker_count = min(max(1, workers), total)
+    if worker_count == 1:
+        items = []
+        for index, row in enumerate(rows, start=1):
+            analysis = analyze_row(row, output_dir, visualize)
+            items.append(analysis)
+            log_progress(
+                {
+                    "event": "product-check:item",
+                    "index": index,
+                    "total": total,
+                    "itemOrder": index,
+                    "batchId": analysis.get("batchId"),
+                    "itemId": analysis.get("itemId"),
+                    "model": analysis.get("model"),
+                    "status": analysis.get("status"),
+                    "suggestedScore": analysis.get("suggestedScore"),
+                    "unsupportedReason": analysis.get("unsupportedReason"),
+                }
+            )
+        return items
+
+    results_by_order: dict[int, dict[str, Any]] = {}
+    completed = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(analyze_row, row, output_dir, visualize): order
+            for order, row in enumerate(rows, start=1)
+        }
+        for future in as_completed(futures):
+            order = futures[future]
+            analysis = future.result()
+            results_by_order[order] = analysis
+            completed += 1
+            log_progress(
+                {
+                    "event": "product-check:item",
+                    "index": completed,
+                    "total": total,
+                    "itemOrder": order,
+                    "batchId": analysis.get("batchId"),
+                    "itemId": analysis.get("itemId"),
+                    "model": analysis.get("model"),
+                    "status": analysis.get("status"),
+                    "suggestedScore": analysis.get("suggestedScore"),
+                    "unsupportedReason": analysis.get("unsupportedReason"),
+                }
+            )
+
+    return [results_by_order[index] for index in range(1, total + 1)]
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run local product consistency checks against cached source/result images."
@@ -1330,6 +1403,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", action="store_true", help="Analyze all batches.")
     parser.add_argument("--limit", type=int, help="Limit rows after filtering.")
     parser.add_argument("--visualize", action="store_true", help="Write source mask, match, and diff overlays.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=default_worker_count(),
+        help="Number of item checks to run concurrently. Use 1 for serial execution.",
+    )
     return parser
 
 
@@ -1353,25 +1432,10 @@ def main() -> int:
             "filters": filters,
             "outputDir": _relpath(output_dir),
             "visualize": args.visualize,
+            "workers": normalize_worker_count(args.workers),
         }
     )
-    items = []
-    for index, row in enumerate(rows, start=1):
-        analysis = analyze_row(row, output_dir, args.visualize)
-        items.append(analysis)
-        log_progress(
-            {
-                "event": "product-check:item",
-                "index": index,
-                "total": len(rows),
-                "batchId": analysis.get("batchId"),
-                "itemId": analysis.get("itemId"),
-                "model": analysis.get("model"),
-                "status": analysis.get("status"),
-                "suggestedScore": analysis.get("suggestedScore"),
-                "unsupportedReason": analysis.get("unsupportedReason"),
-            }
-        )
+    items = analyze_rows(rows, output_dir, args.visualize, normalize_worker_count(args.workers))
     payload = {
         "ok": True,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
