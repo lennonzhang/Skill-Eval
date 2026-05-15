@@ -115,6 +115,93 @@ button.secondary:hover {
   align-items: center;
 }
 
+.task-progress-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.task-progress-strip:empty,
+.task-progress-strip[hidden] {
+  display: none;
+}
+
+.task-card {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.94);
+  box-shadow: 0 8px 20px rgba(50, 42, 31, 0.08);
+}
+
+.task-card-head,
+.task-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.task-card-head strong {
+  font-size: 13px;
+}
+
+.task-card-head span,
+.task-card-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.task-card.running .task-card-head span,
+.task-card.queued .task-card-head span {
+  color: var(--accent);
+}
+
+.task-card.succeeded .task-card-head span {
+  color: var(--good);
+}
+
+.task-card.failed .task-card-head span,
+.task-card.partial .task-card-head span {
+  color: var(--bad);
+}
+
+.task-card-progress {
+  height: 5px;
+  margin: 8px 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.task-card-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.task-card.succeeded .task-card-progress span {
+  background: var(--good);
+}
+
+.task-card.failed .task-card-progress span,
+.task-card.partial .task-card-progress span {
+  background: var(--bad);
+}
+
+.task-card p {
+  margin: 7px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .topbar select {
   width: 280px;
   min-height: 36px;
@@ -548,14 +635,21 @@ button.secondary:hover {
   color: var(--bad);
 }
 
-.retry-image-button {
+.retry-image-button,
+.browser-cache-image-button {
   min-height: 34px;
 }
 
-.retry-image-button:disabled {
+.retry-image-button:disabled,
+.browser-cache-image-button:disabled {
   cursor: progress;
   opacity: 0.68;
   transform: none;
+}
+
+.browser-cache-image-button {
+  border-color: rgba(44, 107, 91, 0.36);
+  color: var(--accent);
 }
 
 .overlay-panel,

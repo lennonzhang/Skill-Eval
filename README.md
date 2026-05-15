@@ -60,6 +60,45 @@ Command details:
 
 Do not run `pnpm import`. That is a pnpm built-in command, not this project's data-import script.
 
+## Image Cache Proxy
+
+The importer first tries to cache each remote image through Node's normal fetch path. If that path fails and a proxy is configured, it retries through the configured HTTP proxy. This is useful when a browser can open the image URL because a browser VPN extension is active, but `pnpm run import:resource` cannot reach the same host from the terminal.
+
+Preferred local setting:
+
+```powershell
+$env:SKILL_EVAL_FETCH_PROXY="http://127.0.0.1:<proxy-port>"
+$env:SKILL_EVAL_FETCH_TIMEOUT_MS="180000"
+pnpm run import:resource -- --file=<resource-file>.json
+```
+
+Notes:
+
+- `SKILL_EVAL_FETCH_PROXY` may contain one or more HTTP proxy URLs separated by commas, semicolons, or spaces. The importer tries them in order.
+- `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` are also recognized as fallbacks. `SKILL_EVAL_FETCH_PROXY` takes priority and is attempted before direct fetch.
+- `NO_PROXY` is respected for environment proxies. Explicit `SKILL_EVAL_FETCH_PROXY` is still allowed because it is intended as a per-project override.
+- Browser VPN extensions do not automatically apply to Node. The extension must expose a local HTTP proxy port, or the terminal import process still cannot use that route.
+- Cache failures are stored per image in SQLite as `source_fetch_error` or `result_fetch_error` and include the attempted path, such as direct fetch or proxy fetch.
+- In the review UI, failed images also have a Browser Cache fallback. If the current browser can read the remote image through its extension/VPN path and the remote host allows page fetch access, the page uploads the image blob back to the local server. The server persists it under `data/cache/` and updates SQLite, so the cache is available after refresh and for Product Check.
+- When a batch is opened, the UI automatically attempts Browser Cache once per failed source/result image in the current browser session. It runs with small concurrency and does not retry the same failed image repeatedly until the page is reloaded.
+
+## Task Progress
+
+The review UI shows compact progress cards for long-running local work:
+
+- Import: started by Import Resource, runs in the local server, and reports parsed, inserted, duplicate, source-cache, result-cache, and cache-failure counts.
+- Browser Cache: started by the page when a batch has failed source/result images. The browser fetches the remote image, then uploads the blob back to the local server. The local server writes `data/cache/` and updates SQLite.
+- Product Check: started by Run Product Check, runs as a Python child process, and reports checked, unsupported, failed, current item, and summary counts.
+
+The task API is intentionally local progress metadata:
+
+```text
+GET /api/tasks/<taskId>
+GET /api/tasks/latest?type=import
+```
+
+Task snapshots are written under `data/task-runs/`. They do not include prompt text, source URLs, result URLs, or optimization prompts. Final business state remains in SQLite, `data/cache/`, `data/import-runs/`, and `data/product-checks/`.
+
 ## Batch Import
 
 One JSON file is one batch. The review UI lists `resource/*.json`; choose one file and click Import Resource. The API only accepts a JSON basename from `resource/`, not a directory, subpath, or absolute path.
@@ -72,7 +111,7 @@ data/import-runs/<batchId>.json
 
 The import summary includes counts, cache success/failure totals, and parse errors. It intentionally does not include prompt text, source URLs, result URLs, or optimization prompts.
 
-During import, both `pnpm run import:resource` and the local review server emit JSONL progress to the terminal. The events include the selected resource filename, batch id, item id, model, processed count, insert/duplicate counts, and source/result cache status. They do not print prompt text or remote URLs.
+During import, `pnpm run import:resource` emits JSONL progress to the terminal and waits for completion. In the review UI, Import Resource starts a background local-server task and the page polls task progress until the batch is ready. The events include the selected resource filename, batch id, item id, model, processed count, insert/duplicate counts, and source/result cache status. They do not print prompt text or remote URLs.
 
 ## Product Consistency Check
 

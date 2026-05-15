@@ -1,6 +1,6 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,8 +13,15 @@ import {
   itemExists,
   saveEvaluation,
 } from "./src/db.js";
-import { importResourceBatch, retryItemImage } from "./src/importer.js";
+import {
+  cacheBrowserUploadedImage,
+  importResourceBatch,
+  MAX_IMAGE_BYTES,
+  normalizeResourceFileName,
+  retryItemImage,
+} from "./src/importer.js";
 import { listResourceJsonFiles } from "./src/importer.js";
+import { createTask, finishTask, getLatestTask, getTask, updateTask } from "./src/tasks.js";
 import { EvaluationValidationError } from "./public/scoring.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +30,7 @@ const dataDir = path.join(__dirname, "data");
 const productChecksDir = path.join(dataDir, "product-checks");
 const port = Number(process.env.PORT || 4173);
 const productCheckJobs = new Map();
+const productCheckBuffers = new Map();
 
 initializeDatabase();
 
@@ -30,8 +38,17 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function toCount(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
 function logEvent(scope, event) {
   console.log(JSON.stringify({ at: nowIso(), scope, ...event }));
+}
+
+function sanitizeError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sendJson(res, statusCode, body) {
@@ -61,6 +78,21 @@ async function readBody(req) {
     error.statusCode = 400;
     throw error;
   }
+}
+
+async function readBinaryBody(req, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const error = new Error(`Request body exceeds ${maxBytes} bytes`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
 }
 
 function contentTypeFor(filePath) {
@@ -150,11 +182,191 @@ function productCheckLogPath(batchId) {
   return path.join(productCheckRunDir(batchId), "run.log");
 }
 
+function normalizeProductCheckStatus(batchId, status) {
+  if (!status || typeof status !== "object") return status;
+  const checked = toCount(status.checked, toCount(status.summary?.checked));
+  const unsupported = toCount(status.unsupported, toCount(status.summary?.unsupported));
+  const failed = toCount(status.failed, toCount(status.summary?.failed));
+  const done = toCount(status.done, toCount(status.summary?.done, toCount(status.summary?.total, checked + unsupported + failed)));
+  const total = toCount(status.total, toCount(status.summary?.total, done));
+  return {
+    ...status,
+    batchId: status.batchId || batchId,
+    status: status.status || "unknown",
+    done,
+    total,
+    checked,
+    unsupported,
+    failed,
+    currentItemId: status.currentItemId || null,
+    latestMessage: status.latestMessage || "",
+    summary: {
+      ...(status.summary || {}),
+      checked,
+      unsupported,
+      failed,
+      done,
+      total,
+    },
+  };
+}
+
 function writeProductCheckStatus(batchId, status) {
   const runDir = productCheckRunDir(batchId);
   mkdirSync(runDir, { recursive: true });
-  writeFileSync(productCheckStatusPath(batchId), JSON.stringify(status, null, 2), "utf8");
-  return status;
+  const normalized = normalizeProductCheckStatus(batchId, status);
+  writeFileSync(productCheckStatusPath(batchId), JSON.stringify(normalized, null, 2), "utf8");
+  return normalized;
+}
+
+function importProgressPatch(event) {
+  const summary = {};
+  if (typeof event.parsed === "number") summary.parsed = event.parsed;
+  if (typeof event.inserted === "number") summary.inserted = event.inserted;
+  if (typeof event.duplicate === "number") summary.duplicate = event.duplicate;
+  if (typeof event.cachedSource === "number") summary.cachedSource = event.cachedSource;
+  if (typeof event.cachedResult === "number") summary.cachedResult = event.cachedResult;
+  if (typeof event.parseErrors === "number") summary.parseErrors = event.parseErrors;
+
+  if (event.type === "import:start") {
+    return {
+      status: "running",
+      sourceFile: event.sourceFile,
+      message: `Importing ${event.sourceFile}`,
+      summary,
+    };
+  }
+  if (event.type === "import:parsed") {
+    return {
+      status: "running",
+      batchId: event.batchId,
+      sourceFile: event.sourceFile,
+      total: event.parsed || 0,
+      message: `Parsed ${event.parsed || 0} item(s)`,
+      summary,
+    };
+  }
+  if (event.type === "import:item") {
+    const sourceFailed = event.sourceStatus === "failed" ? 1 : 0;
+    const resultFailed = event.resultStatus === "failed" ? 1 : 0;
+    return {
+      status: "running",
+      batchId: event.batchId,
+      done: event.index || 0,
+      total: event.total || 0,
+      message: `Imported item ${event.index || 0}/${event.total || 0}`,
+      summary: {
+        ...summary,
+        failedSourceDelta: sourceFailed,
+        failedResultDelta: resultFailed,
+        latestItemId: event.itemId,
+        latestSourceStatus: event.sourceStatus,
+        latestResultStatus: event.resultStatus,
+      },
+    };
+  }
+  if (event.type === "import:finish") {
+    return {
+      status: "succeeded",
+      batchId: event.batchId,
+      sourceFile: event.sourceFile,
+      done: event.parsed || 0,
+      total: event.parsed || 0,
+      message: `Imported ${event.parsed || 0} item(s)`,
+      summary: {
+        ...summary,
+        importRun: event.importRun,
+      },
+    };
+  }
+  return {
+    message: event.type || "Import progress",
+    summary,
+  };
+}
+
+function updateImportTaskFromProgress(taskId, event, counters) {
+  const patch = importProgressPatch(event);
+  if (event.type === "import:item") {
+    counters.failedSource += event.sourceStatus === "failed" ? 1 : 0;
+    counters.failedResult += event.resultStatus === "failed" ? 1 : 0;
+    patch.summary = {
+      ...(patch.summary || {}),
+      failedSource: counters.failedSource,
+      failedResult: counters.failedResult,
+    };
+  }
+  updateTask(taskId, patch);
+}
+
+function startImportTask({ body }) {
+  const sourceFile = body.file;
+  const task = createTask("import", {
+    sourceFile,
+    status: "queued",
+    message: `Queued import ${sourceFile}`,
+    summary: {
+      parsed: 0,
+      inserted: 0,
+      duplicate: 0,
+      cachedSource: 0,
+      cachedResult: 0,
+      failedSource: 0,
+      failedResult: 0,
+      parseErrors: 0,
+    },
+  });
+  const counters = { failedSource: 0, failedResult: 0 };
+
+  setImmediate(async () => {
+    try {
+      const result = await importResourceBatch({
+        batchName: body.name,
+        downloadImages: body.downloadImages !== false,
+        files: sourceFile ? [sourceFile] : [],
+        onProgress: (event) => {
+          logEvent("import", event);
+          updateImportTaskFromProgress(task.id, event, counters);
+        },
+      });
+      finishTask(task.id, "succeeded", {
+        batchId: result.batch.id,
+        done: result.parsed,
+        total: result.parsed,
+        message: `Imported ${result.parsed} item(s)`,
+        summary: {
+          parsed: result.parsed,
+          inserted: result.inserted,
+          duplicate: result.duplicate,
+          cachedSource: result.cachedSource,
+          cachedResult: result.cachedResult,
+          failedSource: counters.failedSource,
+          failedResult: counters.failedResult,
+          parseErrors: result.errors.length,
+          importRun: result.importRun,
+        },
+      });
+      logEvent("import", {
+        event: "task-succeeded",
+        taskId: task.id,
+        batchId: result.batch.id,
+        sourceFile: result.batch.sourceFile,
+      });
+    } catch (error) {
+      finishTask(task.id, "failed", {
+        error: sanitizeError(error),
+        message: "Import failed",
+      });
+      logEvent("import", {
+        event: "task-failed",
+        taskId: task.id,
+        sourceFile,
+        error: sanitizeError(error),
+      });
+    }
+  });
+
+  return task;
 }
 
 async function readProductCheckStatus(batchId) {
@@ -173,7 +385,15 @@ async function readProductCheckStatus(batchId) {
       writeProductCheckStatus(batchId, status);
     }
   }
-  return status;
+  return normalizeProductCheckStatus(batchId, status);
+}
+
+function readProductCheckStatusSync(batchId) {
+  const filePath = productCheckStatusPath(batchId);
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+    return null;
+  }
+  return normalizeProductCheckStatus(batchId, JSON.parse(readFileSync(filePath, "utf8")));
 }
 
 async function appendProductCheckLog(batchId, message) {
@@ -182,14 +402,81 @@ async function appendProductCheckLog(batchId, message) {
   await appendFile(productCheckLogPath(batchId), message, "utf8");
 }
 
+function productCheckSummaryFromStatus(status) {
+  return {
+    total: toCount(status.total),
+    done: toCount(status.done),
+    checked: toCount(status.checked),
+    unsupported: toCount(status.unsupported),
+    failed: toCount(status.failed),
+  };
+}
+
+function updateProductCheckStatusFromEvent(batchId, payload) {
+  const current = readProductCheckStatusSync(batchId) || {
+    batchId,
+    status: "running",
+    startedAt: nowIso(),
+  };
+  const next = {
+    ...current,
+    updatedAt: nowIso(),
+  };
+
+  if (payload.event === "product-check:start") {
+    next.status = "running";
+    next.done = 0;
+    next.total = payload.selected || 0;
+    next.checked = 0;
+    next.unsupported = 0;
+    next.failed = 0;
+    next.latestMessage = `Selected ${next.total} item(s)`;
+    next.outputDir = payload.outputDir || next.outputDir || null;
+    next.summary = productCheckSummaryFromStatus(next);
+  } else if (payload.event === "product-check:item") {
+    const isChecked = payload.status === "checked";
+    const isUnsupported = payload.status && payload.status !== "checked";
+    next.status = "running";
+    next.done = payload.index || (current.done || 0) + 1;
+    next.total = payload.total || current.total || 0;
+    next.currentIndex = payload.index || next.done;
+    next.currentItemId = payload.itemId || null;
+    next.latestMessage = `${payload.status || "item"} ${next.done}/${next.total}`;
+    next.checked = (current.checked || 0) + (isChecked ? 1 : 0);
+    next.unsupported = (current.unsupported || 0) + (isUnsupported ? 1 : 0);
+    next.failed = current.failed || 0;
+    next.latestUnsupportedReason = payload.unsupportedReason || null;
+    next.latestSuggestedScore = payload.suggestedScore ?? null;
+    next.summary = productCheckSummaryFromStatus(next);
+  } else if (payload.event === "product-check:finish") {
+    next.status = "succeeded";
+    next.done = payload.summary?.total ?? current.total ?? current.done ?? 0;
+    next.total = payload.summary?.total ?? current.total ?? next.done;
+    next.summary = payload.summary || current.summary || productCheckSummaryFromStatus(next);
+    next.latestMessage = "Product Check finished";
+    next.output = payload.output || next.output || null;
+  } else {
+    return;
+  }
+
+  writeProductCheckStatus(batchId, next);
+}
+
 function forwardProductCheckOutput(batchId, stream, chunk) {
-  const text = chunk.toString();
-  appendProductCheckLog(batchId, text).catch((error) => console.error(error));
-  for (const line of text.split(/\r?\n/)) {
+  const incoming = chunk.toString();
+  const bufferKey = `${batchId}:${stream}`;
+  const text = `${productCheckBuffers.get(bufferKey) || ""}${incoming}`;
+  appendProductCheckLog(batchId, incoming).catch((error) => console.error(error));
+  const lines = text.split(/\r?\n/);
+  productCheckBuffers.set(bufferKey, lines.pop() || "");
+  for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const payload = JSON.parse(line);
       logEvent("product-check", { batchId, stream, ...payload });
+      if (stream === "stdout" && payload.event?.startsWith("product-check:")) {
+        updateProductCheckStatusFromEvent(batchId, payload);
+      }
     } catch {
       logEvent("product-check", { batchId, stream, message: line });
     }
@@ -208,11 +495,25 @@ async function startProductCheckRun(batchId) {
   const status = writeProductCheckStatus(batchId, {
     batchId,
     status: "running",
+    done: 0,
+    total: 0,
+    checked: 0,
+    unsupported: 0,
+    failed: 0,
+    currentItemId: null,
+    latestMessage: "Starting Product Check",
     startedAt: nowIso(),
+    updatedAt: nowIso(),
     finishedAt: null,
     pid: null,
     exitCode: null,
-    summary: null,
+    summary: {
+      total: 0,
+      done: 0,
+      checked: 0,
+      unsupported: 0,
+      failed: 0,
+    },
     error: null,
   });
   await writeFile(productCheckLogPath(batchId), "", "utf8");
@@ -242,16 +543,22 @@ async function startProductCheckRun(batchId) {
     const next = {
       ...status,
       status: "failed",
+      updatedAt: nowIso(),
       finishedAt: nowIso(),
       exitCode: null,
       error: error.message,
+      latestMessage: "Product Check failed",
     };
     productCheckJobs.delete(batchId);
+    productCheckBuffers.delete(`${batchId}:stdout`);
+    productCheckBuffers.delete(`${batchId}:stderr`);
     writeProductCheckStatus(batchId, next);
     logEvent("product-check", { event: "failed", batchId, error: error.message });
   });
   child.on("close", async (code) => {
     productCheckJobs.delete(batchId);
+    productCheckBuffers.delete(`${batchId}:stdout`);
+    productCheckBuffers.delete(`${batchId}:stderr`);
     let summary = null;
     let error = null;
     if (code === 0) {
@@ -264,15 +571,21 @@ async function startProductCheckRun(batchId) {
     } else {
       error = `Product Check exited with code ${code}`;
     }
+    const currentStatus = (await readProductCheckStatus(batchId)) || status;
     const next = writeProductCheckStatus(batchId, {
+      ...currentStatus,
       batchId,
       status: code === 0 && !error ? "succeeded" : "failed",
-      startedAt: status.startedAt,
+      startedAt: currentStatus.startedAt || status.startedAt,
+      updatedAt: nowIso(),
       finishedAt: nowIso(),
       pid: child.pid,
       exitCode: code,
-      summary,
+      done: summary?.total ?? currentStatus.done ?? currentStatus.total ?? 0,
+      total: summary?.total ?? currentStatus.total ?? currentStatus.done ?? 0,
+      summary: summary || currentStatus.summary,
       error,
+      latestMessage: code === 0 && !error ? "Product Check finished" : "Product Check failed",
     });
     logEvent("product-check", {
       event: next.status,
@@ -292,6 +605,24 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
+  if (req.method === "GET" && taskMatch) {
+    const task = getTask(taskMatch[1]);
+    if (!task) {
+      sendError(res, 404, "Task not found");
+      return;
+    }
+    sendJson(res, 200, { task });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/tasks/latest") {
+    const type = url.searchParams.get("type") || "";
+    const batchId = url.searchParams.get("batchId") || "";
+    sendJson(res, 200, { task: getLatestTask({ type, batchId }) });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/resources") {
     sendJson(res, 200, { resources: await listResourceJsonFiles() });
     return;
@@ -299,29 +630,19 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/import") {
     const body = await readBody(req);
+    if (!body.file) {
+      const error = new Error("Exactly one resource JSON file must be selected for import");
+      error.statusCode = 400;
+      throw error;
+    }
+    body.file = normalizeResourceFileName(body.file);
     logEvent("import", {
       event: "request",
       sourceFile: body.file || null,
       downloadImages: body.downloadImages !== false,
     });
-    const result = await importResourceBatch({
-      batchName: body.name,
-      downloadImages: body.downloadImages !== false,
-      files: body.file ? [body.file] : [],
-      onProgress: (event) => logEvent("import", event),
-    });
-    logEvent("import", {
-      event: "response",
-      batchId: result.batch.id,
-      sourceFile: result.batch.sourceFile,
-      parsed: result.parsed,
-      inserted: result.inserted,
-      duplicate: result.duplicate,
-      cachedSource: result.cachedSource,
-      cachedResult: result.cachedResult,
-      errors: result.errors.length,
-    });
-    sendJson(res, 200, result);
+    const task = startImportTask({ body });
+    sendJson(res, 202, { task });
     return;
   }
 
@@ -402,6 +723,34 @@ async function handleApi(req, res, url) {
       sendJson(res, 200, { retry });
     } catch (error) {
       if (error?.statusCode === 400 || error?.statusCode === 404) {
+        sendError(res, error.statusCode, error.message);
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+
+  const browserCacheMatch = url.pathname.match(/^\/api\/items\/([^/]+)\/images\/(source|result)\/browser-cache$/);
+  if (req.method === "POST" && browserCacheMatch) {
+    try {
+      const buffer = await readBinaryBody(req, MAX_IMAGE_BYTES);
+      const retry = await cacheBrowserUploadedImage({
+        itemId: browserCacheMatch[1],
+        kind: browserCacheMatch[2],
+        buffer,
+        contentType: req.headers["content-type"],
+      });
+      logEvent("image-cache", {
+        event: "browser-cache",
+        itemId: retry.itemId,
+        batchId: retry.batchId,
+        kind: retry.kind,
+        bytes: buffer.length,
+      });
+      sendJson(res, 200, { retry });
+    } catch (error) {
+      if ([400, 404, 413].includes(error?.statusCode)) {
         sendError(res, error.statusCode, error.message);
         return;
       }

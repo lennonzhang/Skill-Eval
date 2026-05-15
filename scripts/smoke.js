@@ -26,9 +26,29 @@ async function postJson(path, body) {
   return { response, payload };
 }
 
+async function waitForTask(taskId, expectedStatus) {
+  const deadline = Date.now() + 8000;
+  let latest = null;
+  while (Date.now() < deadline) {
+    const { task } = await getJson(`/api/tasks/${taskId}`);
+    latest = task;
+    if (task.status === expectedStatus) return task;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Task ${taskId} did not reach ${expectedStatus}; latest=${JSON.stringify(latest)}`);
+}
+
 const html = await getText("/");
 if (!html.includes("Skill Eval Review")) {
   throw new Error("Review page did not return expected HTML");
+}
+if (!html.includes("taskProgressStrip")) {
+  throw new Error("Review page did not include the task progress strip");
+}
+
+const missingTask = await fetch(`${baseUrl}/api/tasks/not-a-real-task`);
+if (missingTask.status !== 404) {
+  throw new Error(`Missing task returned HTTP ${missingTask.status}, expected 404`);
 }
 
 const { batches } = await getJson("/api/batches");
@@ -54,6 +74,18 @@ const nonJsonImport = await postJson("/api/import", {
 });
 if (nonJsonImport.response.status !== 400) {
   throw new Error(`Import with a non-JSON file returned HTTP ${nonJsonImport.response.status}, expected 400`);
+}
+
+const missingJsonImport = await postJson("/api/import", {
+  file: "smoke-missing-resource.json",
+  downloadImages: false,
+});
+if (missingJsonImport.response.status !== 202 || !missingJsonImport.payload.task?.id) {
+  throw new Error(`Import with a missing JSON file returned HTTP ${missingJsonImport.response.status}, expected 202 task`);
+}
+const failedImportTask = await waitForTask(missingJsonImport.payload.task.id, "failed");
+if (!failedImportTask.error?.includes("Resource file not found")) {
+  throw new Error("Missing JSON import task did not record the expected failure");
 }
 
 if (batches.length === 0) {
@@ -111,6 +143,9 @@ if (productCheck !== null) {
 const { run } = await getJson(`/api/batches/${batch.id}/product-check/runs/latest`);
 if (run !== null && run.batchId !== batch.id) {
   throw new Error("Product-check run status batch id mismatch");
+}
+if (run !== null && (!("status" in run) || !("done" in run) || !("total" in run) || !("summary" in run))) {
+  throw new Error("Product-check run status did not include status/done/total/summary");
 }
 
 const invalidEvaluation = await postJson(`/api/items/${items[0].id}/evaluation`, {

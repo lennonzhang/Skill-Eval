@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import http from "node:http";
 
 import {
   createBatch,
@@ -11,12 +12,81 @@ import {
   updateBatchCounts,
   updateSingleImageCacheStatus,
 } from "../src/db.js";
+import { fetchBinaryWithFallbacks, getConfiguredFetchProxies, getFetchTimeoutMs } from "../src/image-fetch.js";
+import { createTask, finishTask, getLatestTask, getTask, updateTask } from "../src/tasks.js";
 import { calculateOverallScore, EvaluationValidationError, validateEvaluationInput } from "../public/scoring.js";
 
 const db = getDatabase();
 const testBatchId = `selftest-batch-${randomUUID()}`;
 const testItemId = `selftest-item-${randomUUID()}`;
 const now = new Date().toISOString();
+const onePixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+  "base64"
+);
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function runFetchProxySelftest() {
+  let proxyRequests = 0;
+  const proxy = http.createServer((req, res) => {
+    proxyRequests += 1;
+    assert.equal(req.method, "GET");
+    assert.equal(req.url, "http://127.0.0.1:1/proxy-image.png");
+    res.writeHead(200, {
+      "content-type": "image/png",
+      "content-length": onePixelPng.length,
+    });
+    res.end(onePixelPng);
+  });
+
+  await listen(proxy);
+  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+  try {
+    assert.deepEqual(
+      getConfiguredFetchProxies("https://example.test/image.png", {
+        SKILL_EVAL_FETCH_PROXY: `${proxyUrl}, http://127.0.0.1:9`,
+        HTTPS_PROXY: "http://127.0.0.1:9",
+        NO_PROXY: "example.test",
+      }),
+      [new URL(proxyUrl).href, "http://127.0.0.1:9/"]
+    );
+    assert.equal(getFetchTimeoutMs({ SKILL_EVAL_FETCH_TIMEOUT_MS: "1500" }), 1500);
+
+    const response = await fetchBinaryWithFallbacks("http://127.0.0.1:1/proxy-image.png", {
+      proxyUrls: [proxyUrl],
+      preferProxy: false,
+      timeoutMs: 1000,
+      maxBytes: 1024,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/png");
+    assert.deepEqual(response.body, onePixelPng);
+    assert.equal(proxyRequests, 1);
+    assert.equal(response.attempts.length, 1);
+    assert.equal(response.attempts[0].via, "direct");
+  } finally {
+    await closeServer(proxy);
+  }
+}
 const beforeRollback = getBatchStats(testBatchId).summary;
 
 assert.equal(beforeRollback.total_items, 0);
@@ -178,6 +248,34 @@ const afterRollback = getBatchStats(testBatchId).summary;
 assert.equal(afterRollback.total_items, 0);
 assert.equal(afterRollback.reviewed_items, 0);
 
+await runFetchProxySelftest();
+
+const task = createTask("selftest", {
+  batchId: testBatchId,
+  status: "queued",
+  summary: { inserted: 0 },
+});
+assert.equal(getTask(task.id).status, "queued");
+updateTask(task.id, {
+  status: "running",
+  done: 1,
+  total: 2,
+  summary: { inserted: 1 },
+});
+let updatedTask = getTask(task.id);
+assert.equal(updatedTask.status, "running");
+assert.equal(updatedTask.done, 1);
+assert.equal(updatedTask.summary.inserted, 1);
+finishTask(task.id, "succeeded", {
+  done: 2,
+  total: 2,
+  summary: { inserted: 2 },
+});
+updatedTask = getLatestTask({ type: "selftest", batchId: testBatchId });
+assert.equal(updatedTask.id, task.id);
+assert.equal(updatedTask.status, "succeeded");
+assert.equal(updatedTask.done, 2);
+
 console.log(
   JSON.stringify(
     {
@@ -187,6 +285,8 @@ console.log(
       reviewedBeforeRollback: beforeRollback.reviewed_items,
       reviewedAfterRollback: afterRollback.reviewed_items,
       retryCacheUpdate: "passed",
+      proxyFetchFallback: "passed",
+      taskStatus: "passed",
     },
     null,
     2

@@ -14,6 +14,7 @@ import {
   updateItemCacheStatus,
   updateSingleImageCacheStatus,
 } from "./db.js";
+import { fetchBinaryWithFallbacks } from "./image-fetch.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -29,7 +30,7 @@ const IMAGE_EXTENSIONS = new Map([
   ["image/gif", ".gif"],
   ["image/avif", ".avif"],
 ]);
-const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -113,15 +114,53 @@ function emitProgress(onProgress, event) {
   });
 }
 
+function imageTypeFromBuffer(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") {
+    return "image/webp";
+  }
+  if (buffer.length >= 6 && ["GIF87a", "GIF89a"].includes(buffer.toString("ascii", 0, 6))) {
+    return "image/gif";
+  }
+  if (buffer.length >= 12 && buffer.toString("ascii", 4, 8) === "ftyp" && buffer.toString("ascii", 8, 12).startsWith("avi")) {
+    return "image/avif";
+  }
+  return "";
+}
+
+function normalizeImageUpload(contentType, buffer) {
+  const declaredType = String(contentType || "").split(";")[0]?.toLowerCase() || "";
+  const detectedType = imageTypeFromBuffer(buffer);
+  const type = IMAGE_EXTENSIONS.has(detectedType) ? detectedType : declaredType;
+  const ext = IMAGE_EXTENSIONS.get(type);
+  if (!ext) {
+    throw new Error(`Unsupported image content-type: ${declaredType || detectedType || "missing"}`);
+  }
+  return { type, ext };
+}
+
 export async function cacheImage({ url, batchId, itemId, kind }) {
   const itemDir = path.join(cacheDir, batchId, itemId);
   mkdirSync(itemDir, { recursive: true });
 
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
+  const response = await fetchBinaryWithFallbacks(url, {
+    maxBytes: MAX_IMAGE_BYTES,
+  });
   const contentType = response.headers.get("content-type")?.split(";")[0]?.toLowerCase() || "";
   const ext = IMAGE_EXTENSIONS.get(contentType);
   if (!ext) {
@@ -130,13 +169,68 @@ export async function cacheImage({ url, batchId, itemId, kind }) {
 
   const relativePath = path.join("data", "cache", batchId, itemId, `${kind}${ext}`);
   const absolutePath = path.join(rootDir, relativePath);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > MAX_IMAGE_BYTES) {
-    throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
+
+  await writeFile(absolutePath, response.body);
+  return relativePath;
+}
+
+export async function cacheBrowserUploadedImage({ itemId, kind, buffer, contentType }) {
+  initializeDatabase();
+
+  if (!["source", "result"].includes(kind)) {
+    const error = new Error("Image kind must be source or result");
+    error.statusCode = 400;
+    throw error;
   }
 
+  const item = getItemById(itemId);
+  if (!item) {
+    const error = new Error("Item not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    const error = new Error("Uploaded image body is empty");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (buffer.length > MAX_IMAGE_BYTES) {
+    const error = new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
+    error.statusCode = 413;
+    throw error;
+  }
+
+  let ext;
+  try {
+    ({ ext } = normalizeImageUpload(contentType, buffer));
+  } catch (error) {
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const itemDir = path.join(cacheDir, item.batch_id, itemId);
+  mkdirSync(itemDir, { recursive: true });
+  const relativePath = path.join("data", "cache", item.batch_id, itemId, `${kind}${ext}`);
+  const absolutePath = path.join(rootDir, relativePath);
   await writeFile(absolutePath, buffer);
-  return relativePath;
+
+  updateSingleImageCacheStatus(itemId, kind, {
+    imagePath: relativePath,
+    fetchStatus: "success",
+    fetchError: null,
+  });
+  updateBatchCounts(item.batch_id);
+
+  return {
+    itemId,
+    batchId: item.batch_id,
+    kind,
+    imagePath: relativePath,
+    imageUrl: `/${relativePath.replaceAll("\\", "/")}`,
+    fetchStatus: "success",
+    fetchError: null,
+  };
 }
 
 export async function retryItemImage(itemId, kind) {
