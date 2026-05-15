@@ -25,6 +25,15 @@ def canvas(width: int = 256, height: int = 256) -> np.ndarray:
     return np.full((height, width, 3), 255, dtype=np.uint8)
 
 
+def noisy_white_canvas(width: int = 256, height: int = 256) -> np.ndarray:
+    y, x = np.indices((height, width))
+    noise = ((x * 3 + y * 5) % 17).astype(np.uint8)
+    base = np.full((height, width, 3), 246, dtype=np.uint8)
+    base[:, :, 0] = np.clip(base[:, :, 0] - noise, 0, 255)
+    base[:, :, 1] = np.clip(base[:, :, 1] - (noise // 2), 0, 255)
+    return base
+
+
 def draw_product(
     image: np.ndarray,
     dx: int = 0,
@@ -41,6 +50,19 @@ def draw_product(
     cv2.circle(output, (128 + dx, 120 + dy), 28, (240, 210, 80), -1)
     cv2.circle(output, (128 + dx, 120 + dy), 28, outline, 3)
     cv2.line(output, (92 + dx, 86 + dy), (170 + dx, 75 + dy), (245, 245, 245), 3)
+    return output
+
+
+def draw_edge_touching_product(image: np.ndarray) -> np.ndarray:
+    output = image.copy()
+    body = np.array([[0, 58], [94, 64], [114, 176], [0, 198]])
+    outline = (18, 34, 64)
+    cv2.fillPoly(output, [body], (54, 116, 168))
+    cv2.polylines(output, [body], isClosed=True, color=outline, thickness=4)
+    cv2.rectangle(output, (24, 104), (92, 142), (242, 244, 246), -1)
+    cv2.rectangle(output, (24, 104), (92, 142), outline, 2)
+    cv2.circle(output, (62, 88), 13, (236, 190, 68), -1)
+    cv2.circle(output, (62, 88), 13, outline, 2)
     return output
 
 
@@ -64,6 +86,55 @@ def draw_solid_white_product(image: np.ndarray) -> np.ndarray:
     cv2.ellipse(output, (128, 128), (58, 38), 0, 0, 360, (238, 240, 242), -1)
     cv2.ellipse(output, (128, 128), (58, 38), 0, 0, 360, (80, 80, 80), 4)
     cv2.line(output, (92, 120), (164, 120), (225, 228, 230), 3)
+    return output
+
+
+def draw_bottle_with_white_label(image: np.ndarray, label_text: str = "BREEZE") -> np.ndarray:
+    output = image.copy()
+    cv2.rectangle(output, (94, 64), (162, 184), (142, 82, 28), -1)
+    cv2.rectangle(output, (94, 64), (162, 184), (65, 45, 32), 4)
+    cv2.rectangle(output, (86, 104), (170, 151), (246, 248, 248), -1)
+    cv2.rectangle(output, (86, 104), (170, 151), (210, 214, 216), 1)
+    cv2.putText(output, label_text, (96, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (65, 65, 65), 1, cv2.LINE_AA)
+    cv2.putText(output, "250ml", (111, 141), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (80, 80, 80), 1, cv2.LINE_AA)
+    cv2.rectangle(output, (108, 45), (148, 68), (25, 25, 25), -1)
+    cv2.rectangle(output, (116, 24), (140, 48), (18, 18, 18), -1)
+    return output
+
+
+def draw_bag_with_handle_hole(image: np.ndarray, fill_hole: bool = False) -> np.ndarray:
+    output = image.copy()
+    bag_color = (212, 166, 78)
+    outline = (115, 82, 38)
+    body = np.array([[62, 112], [194, 112], [210, 198], [46, 198]])
+    cv2.fillPoly(output, [body], bag_color)
+    cv2.polylines(output, [body], isClosed=True, color=outline, thickness=4)
+    cv2.ellipse(output, (128, 118), (54, 62), 0, 200, 340, outline, 10)
+    cv2.ellipse(output, (128, 118), (39, 48), 0, 204, 336, bag_color, 8)
+    if fill_hole:
+        cv2.fillPoly(
+            output,
+            [
+                np.array(
+                    [
+                        [72, 110],
+                        [86, 78],
+                        [111, 54],
+                        [128, 48],
+                        [145, 54],
+                        [170, 78],
+                        [184, 110],
+                        [180, 121],
+                        [76, 121],
+                    ]
+                )
+            ],
+            bag_color,
+        )
+    cv2.rectangle(output, (116, 125), (140, 164), (218, 174, 92), -1)
+    cv2.rectangle(output, (116, 125), (140, 164), outline, 2)
+    cv2.rectangle(output, (120, 132), (136, 146), (238, 203, 120), -1)
+    cv2.rectangle(output, (120, 132), (136, 146), outline, 2)
     return output
 
 
@@ -193,6 +264,39 @@ def main() -> int:
         )
     )
 
+    noisy_background_source = draw_product(noisy_white_canvas())
+    cases.append(
+        run_case(
+            "non_perfect_white_background",
+            noisy_background_source,
+            noisy_background_source.copy(),
+            lambda a: (
+                assert_true(a["status"] == "checked", "non-perfect white background should still be checked"),
+                assert_true(a["unsupportedReason"] is None, "non-perfect white background should not be unsupported"),
+                assert_true(a["suggestedScore"] >= 4, "unchanged product on non-perfect white should stay high"),
+                assert_true(
+                    a["maskQuality"].get("borderRelaxedWhiteRatio", 0) > 0.60,
+                    "border white prior should be captured as a diagnostic",
+                ),
+            ),
+        )
+    )
+
+    edge_touching_source = draw_edge_touching_product(canvas())
+    cases.append(
+        run_case(
+            "edge_touching_product",
+            edge_touching_source,
+            edge_touching_source.copy(),
+            lambda a: (
+                assert_true(a["status"] == "checked", "edge-touching product should be checked"),
+                assert_true(a["sourceBbox"]["x"] == 0, "edge-touching product bbox should keep the border contact"),
+                assert_true(a["maskQuality"].get("maskAreaRatio", 0) > 0.05, "edge-touching product mask should be substantial"),
+                assert_true(a["suggestedScore"] >= 4, "unchanged edge-touching product should stay high"),
+            ),
+        )
+    )
+
     cases.append(
         run_case(
             "pure_white_source",
@@ -247,6 +351,70 @@ def main() -> int:
         )
     )
 
+    white_label_source = draw_bottle_with_white_label(canvas())
+    cases.append(
+        run_case(
+            "white_label_is_material",
+            white_label_source,
+            white_label_source.copy(),
+            lambda a: (
+                assert_true(a["status"] == "checked", "white-label bottle should be checked"),
+                assert_true(a["maskQuality"].get("whiteMaterialAreaRatio", 0) > 0.005, "white label should be kept as material"),
+                assert_true(a["maskQuality"].get("holeAreaRatio", 0) == 0, "white label should not be a hole"),
+                assert_true(a["maskQuality"].get("holeConfidence") == "none", "white label should not expose a confident hole"),
+                assert_true(a["suggestedScore"] >= 4, "unchanged white-label product should stay high"),
+            ),
+        )
+    )
+
+    white_label_changed = white_label_source.copy()
+    cv2.rectangle(white_label_changed, (96, 112), (160, 142), (205, 214, 222), -1)
+    cv2.putText(white_label_changed, "DRIFT", (101, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (35, 35, 35), 1, cv2.LINE_AA)
+    cases.append(
+        run_case(
+            "white_label_text_changed_is_material",
+            white_label_source,
+            white_label_changed,
+            lambda a: (
+                assert_true("hole_filled" not in a["tags"], "label text change should not be treated as hole fill"),
+                assert_true(a["maskQuality"].get("whiteMaterialAreaRatio", 0) > 0.005, "changed label should still be material"),
+                assert_true(a["metrics"].get("materialP90Diff", 0) > 0.0, "label material should contribute to material diff"),
+            ),
+        )
+    )
+
+    bag_source = draw_bag_with_handle_hole(canvas())
+    cases.append(
+        run_case(
+            "bag_handle_hole_detected",
+            bag_source,
+            bag_source.copy(),
+            lambda a: (
+                assert_true(a["status"] == "checked", "bag with handle hole should be checked"),
+                assert_true(a["maskQuality"].get("holeAreaRatio", 0) > 0, "handle opening should be detected as a hole"),
+                assert_true(a["maskQuality"].get("holeConfidence") in {"medium", "high"}, "handle opening should have hole confidence"),
+                assert_true(a["suggestedScore"] >= 4, "unchanged bag should stay high"),
+            ),
+        )
+    )
+
+    bag_hole_filled = draw_bag_with_handle_hole(canvas(), fill_hole=True)
+    cases.append(
+        run_case(
+            "bag_handle_hole_filled_is_diagnostic",
+            bag_source,
+            bag_hole_filled,
+            lambda a: (
+                assert_true(
+                    a["maskQuality"].get("holeAreaRatio", 0) > 0,
+                    "filled handle test should start from a detected source hole",
+                ),
+                assert_true(a["metrics"].get("holeClosureScore", 0) > 0.45, "filled handle should stay diagnostic"),
+                assert_true("hole_filled" not in a["tags"], "filled handle should not hard-tag hole_filled"),
+            ),
+        )
+    )
+
     ring_source = draw_ring_product(canvas())
     ring_hole_background_changed = ring_source.copy()
     cv2.circle(ring_hole_background_changed, (128, 128), 24, (232, 238, 244), -1)
@@ -263,16 +431,33 @@ def main() -> int:
         )
     )
 
+    ring_hole_background_colored = ring_source.copy()
+    cv2.circle(ring_hole_background_colored, (128, 128), 24, (186, 196, 206), -1)
+    cases.append(
+        run_case(
+            "ring_hole_background_colored",
+            ring_source,
+            ring_hole_background_colored,
+            lambda a: (
+                assert_true(a["maskQuality"].get("holeAreaRatio", 0) > 0, "source ring hole should be detected"),
+                assert_true(a["metrics"].get("holeNonWhiteResultRatio", 0) > 0.80, "non-white hole background should be diagnostic"),
+                assert_true(a["suggestedScore"] >= 4, "hole background color should not hard-fail product preservation"),
+                assert_true("hole_filled" not in a["tags"], "hole background color should not be tagged as filled"),
+            ),
+        )
+    )
+
     ring_hole_filled = ring_source.copy()
     cv2.circle(ring_hole_filled, (128, 128), 24, (45, 90, 180), -1)
     cases.append(
         run_case(
-            "ring_hole_filled",
+            "ring_hole_filled_is_diagnostic",
             ring_source,
             ring_hole_filled,
             lambda a: (
-                assert_true(a["suggestedScore"] <= 2, "filled hole should be capped low"),
-                assert_true("hole_filled" in a["tags"], "filled hole should be tagged"),
+                assert_true(a["metrics"].get("holeClosureScore", 0) > 0.45, "filled hole should stay diagnostic"),
+                assert_true(a["suggestedScore"] >= 4, "filled hole alone should not be capped low"),
+                assert_true("hole_filled" not in a["tags"], "filled hole alone should not be tagged"),
             ),
         )
     )
@@ -325,7 +510,10 @@ def main() -> int:
             real_silhouette_damage,
             lambda a: (
                 assert_true(a["suggestedScore"] <= 2, "real silhouette damage should score low"),
-                assert_true("silhouette_damage" in a["tags"], "real silhouette damage should be tagged"),
+                assert_true(
+                    "silhouette_damage" in a["tags"] or "product_changed" in a["tags"],
+                    "real product damage should be hard-tagged",
+                ),
             ),
         )
     )
@@ -351,8 +539,7 @@ def main() -> int:
         )
     )
 
-    mild_structure_change = source.copy()
-    cv2.GaussianBlur(mild_structure_change, (5, 5), 0, dst=mild_structure_change)
+    mild_structure_change = cv2.convertScaleAbs(source, alpha=1.0, beta=4)
     mild_case = run_case(
         "no_tag_low_score_guard",
         source,

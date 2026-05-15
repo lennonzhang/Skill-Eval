@@ -29,7 +29,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = ROOT_DIR / "data" / "app.sqlite"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "product-checks"
 SUPPORTED_IMAGE_STATUSES = {"success"}
-SCORE_VERSION = "product-check-v3"
+SCORE_VERSION = "product-check-v3.2"
 
 
 def log_progress(event: dict[str, Any]) -> None:
@@ -138,6 +138,7 @@ def _largest_components(mask: np.ndarray) -> np.ndarray:
 
     image_area = mask.shape[0] * mask.shape[1]
     components: list[dict[str, Any]] = []
+    height, width = mask.shape[:2]
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < max(8, int(image_area * 0.00005)):
@@ -146,21 +147,31 @@ def _largest_components(mask: np.ndarray) -> np.ndarray:
         y = int(stats[label, cv2.CC_STAT_TOP])
         w = int(stats[label, cv2.CC_STAT_WIDTH])
         h = int(stats[label, cv2.CC_STAT_HEIGHT])
-        touches_border = x <= 0 or y <= 0 or x + w >= mask.shape[1] or y + h >= mask.shape[0]
+        bbox_area = max(1, w * h)
+        extent = area / bbox_area
+        span_ratio = max(w / max(1, width), h / max(1, height))
+        touches_border = x <= 0 or y <= 0 or x + w >= width or y + h >= height
+        # Edge-touching products are valid. Treat touching the image border as
+        # neutral evidence, while still rejecting huge low-density regions that
+        # usually indicate leaked background.
+        product_likeness = area * (0.65 + min(extent, 0.85) * 0.35)
+        if touches_border and extent >= 0.18 and span_ratio <= 0.92:
+            product_likeness *= 1.05
+        if span_ratio > 0.95 and extent < 0.18:
+            product_likeness *= 0.35
         components.append(
             {
                 "label": label,
                 "area": area,
-                "touches_border": touches_border,
+                "product_likeness": product_likeness,
             }
         )
 
     if not components:
         return np.zeros_like(mask, dtype=bool)
 
-    non_border = [component for component in components if not component["touches_border"]]
-    candidates = non_border if non_border else components
-    candidates.sort(key=lambda component: component["area"], reverse=True)
+    candidates = components
+    candidates.sort(key=lambda component: component["product_likeness"], reverse=True)
     largest_area = candidates[0]["area"]
     minimum_area = max(int(largest_area * 0.08), int(image_area * 0.0005), 16)
     keep_labels = [component["label"] for component in candidates[:6] if component["area"] >= minimum_area]
@@ -182,71 +193,208 @@ def _component_perimeter(component: np.ndarray) -> np.ndarray:
     return dilated & ~component
 
 
-def _filter_hole_components(
-    source_rgb: np.ndarray,
-    candidate_holes: np.ndarray,
-    material_support_mask: np.ndarray,
-    silhouette_mask: np.ndarray,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    height, width = source_rgb.shape[:2]
-    image_area = height * width
-    if not np.any(candidate_holes):
-        return np.zeros_like(candidate_holes, dtype=bool), {
-            "holeAreaRatio": 0.0,
-            "holeComponentCount": 0,
-            "holeConfidence": "none",
-        }
-
+def _white_region_masks(source_rgb: np.ndarray) -> dict[str, Any]:
     rgb_float = source_rgb.astype(np.int16)
     white_distance = np.linalg.norm(rgb_float - 255, axis=2)
     hsv = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2HSV)
     saturation = hsv[:, :, 1]
-    white_candidate = (white_distance < 45) & (saturation < 45)
+    return {
+        "whiteDistance": white_distance,
+        "saturation": saturation,
+        "strictWhite": (white_distance < 28) & (saturation < 20),
+        "relaxedWhite": (white_distance < 45) & (saturation < 35),
+    }
 
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate_holes.astype(np.uint8), connectivity=8)
-    kept = np.zeros_like(candidate_holes, dtype=bool)
+
+def _extract_exterior_background(
+    source_rgb: np.ndarray,
+    relaxed_white: np.ndarray,
+    strict_white: np.ndarray,
+    edges: np.ndarray,
+) -> np.ndarray:
+    height, width = source_rgb.shape[:2]
+    non_white_seed = ~relaxed_white
+    foreground_guard = cv2.dilate(non_white_seed.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1) > 0
+    edge_barrier = cv2.dilate(edges.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+    passable_background = relaxed_white & ~foreground_guard & ~edge_barrier
+
+    count, labels = cv2.connectedComponents(passable_background.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return np.zeros((height, width), dtype=bool)
+
+    border_seed = np.zeros_like(relaxed_white, dtype=bool)
+    border_seed[0, :] = strict_white[0, :] & passable_background[0, :]
+    border_seed[-1, :] = strict_white[-1, :] & passable_background[-1, :]
+    border_seed[:, 0] |= strict_white[:, 0] & passable_background[:, 0]
+    border_seed[:, -1] |= strict_white[:, -1] & passable_background[:, -1]
+
+    if np.any(border_seed):
+        seed_labels = {int(label) for label in np.unique(labels[border_seed]) if int(label) != 0}
+    else:
+        seed_labels = _connected_border_labels(labels)
+
+    return np.isin(labels, list(seed_labels)) & passable_background
+
+
+def _classify_internal_white_components(
+    source_rgb: np.ndarray,
+    internal_white: np.ndarray,
+    material_seed_mask: np.ndarray,
+    silhouette_mask: np.ndarray,
+    exterior_background_mask: np.ndarray,
+    relaxed_white: np.ndarray,
+    edges: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    height, width = source_rgb.shape[:2]
+    image_area = height * width
+    empty = np.zeros_like(internal_white, dtype=bool)
+    if not np.any(internal_white):
+        return empty, empty, {
+            "holeAreaRatio": 0.0,
+            "holeComponentCount": 0,
+            "holeConfidence": "none",
+            "internalWhiteAreaRatio": 0.0,
+            "internalWhiteComponentCount": 0,
+            "holeCandidateCount": 0,
+            "whiteMaterialAreaRatio": 0.0,
+            "whiteMaterialComponentCount": 0,
+        }
+
+    gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2HSV)
+    saturation = hsv[:, :, 1]
+    edge_mask = edges > 0
+    edge_neighborhood = cv2.dilate(edge_mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+    silhouette_perimeter = _component_perimeter(silhouette_mask)
+    silhouette_area = max(1, int(np.count_nonzero(silhouette_mask)))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(internal_white.astype(np.uint8), connectivity=8)
+
+    hole_mask = np.zeros_like(internal_white, dtype=bool)
+    white_material_mask = np.zeros_like(internal_white, dtype=bool)
+    min_area = max(24, int(image_area * 0.00012))
     confidences: list[str] = []
-    min_area = max(32, int(image_area * 0.0002))
+    internal_components = 0
+    white_material_components = 0
+
     for label in range(1, count):
         component = labels == label
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < min_area:
+            white_material_mask |= component
             continue
-        source_white_ratio = float(np.mean(white_candidate[component]))
+        internal_components += 1
+
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        bbox_area = max(1, w * h)
+        bbox_aspect = w / max(1, h)
+        bbox_extent = area / bbox_area
+        source_white_ratio = float(np.mean(relaxed_white[component]))
         source_saturation_mean = float(np.mean(saturation[component]))
         perimeter = _component_perimeter(component)
         perimeter_count = int(np.count_nonzero(perimeter))
         surrounded_by_material_ratio = (
-            float(np.count_nonzero(perimeter & material_support_mask) / perimeter_count) if perimeter_count else 0.0
+            float(np.count_nonzero(perimeter & material_seed_mask) / perimeter_count) if perimeter_count else 0.0
         )
-        silhouette_area = max(1, int(np.count_nonzero(silhouette_mask)))
         component_silhouette_ratio = area / silhouette_area
-        if (
-            source_white_ratio >= 0.70
-            and source_saturation_mean <= 45
-            and surrounded_by_material_ratio >= 0.50
+        boundary_edge_ratio = float(np.count_nonzero(perimeter & edge_neighborhood) / perimeter_count) if perimeter_count else 0.0
+        outer_silhouette_touch_ratio = (
+            float(np.count_nonzero(perimeter & silhouette_perimeter) / perimeter_count) if perimeter_count else 0.0
+        )
+        component_core = cv2.erode(component.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+        core_count = max(1, int(np.count_nonzero(component_core)))
+        core_dark_ratio = float(np.count_nonzero(component_core & (gray < 215) & ~relaxed_white) / core_count)
+        # Treat dark strokes as label/print evidence. Edge density alone is not
+        # material evidence because true holes often have strong white-boundary edges.
+        ink_texture_density = core_dark_ratio
+
+        label_band_score = 0.0
+        if bbox_aspect >= 1.65 and bbox_extent >= 0.35:
+            label_band_score += 0.35
+        if ink_texture_density >= 0.04:
+            label_band_score += 0.35
+        if component_silhouette_ratio >= 0.08:
+            label_band_score += 0.15
+        if outer_silhouette_touch_ratio >= 0.12 and ink_texture_density >= 0.02:
+            label_band_score += 0.20
+        label_band_score = _clamp(label_band_score)
+
+        material_strong = (
+            ink_texture_density >= 0.08
+            or label_band_score >= 0.60
+            or (outer_silhouette_touch_ratio >= 0.20 and ink_texture_density >= 0.04)
+            or component_silhouette_ratio > 0.35
+            or (bbox_aspect >= 2.0 and bbox_extent >= 0.45 and ink_texture_density >= 0.04)
+        )
+        hole_strong = (
+            source_white_ratio >= 0.75
+            and source_saturation_mean <= 50
+            and surrounded_by_material_ratio >= 0.45
+            and boundary_edge_ratio >= 0.16
+            and ink_texture_density < 0.12
+            and label_band_score < 0.45
+            and (
+                outer_silhouette_touch_ratio < 0.18
+                or (bbox_extent >= 0.18 and surrounded_by_material_ratio >= 0.55 and boundary_edge_ratio >= 0.32)
+            )
             and component_silhouette_ratio <= 0.45
-        ):
-            kept |= component
-            if source_white_ratio >= 0.85 and surrounded_by_material_ratio >= 0.70:
+            and area >= max(256, int(silhouette_area * 0.01))
+        )
+
+        if not material_strong and hole_strong:
+            hole_mask |= component
+            if surrounded_by_material_ratio >= 0.65 and boundary_edge_ratio >= 0.24:
                 confidences.append("high")
             else:
                 confidences.append("medium")
+        else:
+            white_material_mask |= component
+            white_material_components += 1
 
-    hole_area = int(np.count_nonzero(kept))
+    white_material_area_before_guard = int(np.count_nonzero(white_material_mask))
+    white_material_ratio_in_silhouette = white_material_area_before_guard / silhouette_area if silhouette_area else 0.0
+    internal_white_ratio_in_silhouette = int(np.count_nonzero(internal_white)) / silhouette_area if silhouette_area else 0.0
+    if np.any(hole_mask) and white_material_ratio_in_silhouette > 0.35 and internal_white_ratio_in_silhouette > 0.55:
+        white_material_mask |= hole_mask
+        hole_mask = np.zeros_like(hole_mask, dtype=bool)
+        confidences = []
+    elif np.any(hole_mask) and white_material_ratio_in_silhouette > 0.35:
+        guarded_holes = np.zeros_like(hole_mask, dtype=bool)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(hole_mask.astype(np.uint8), connectivity=8)
+        for label in range(1, count):
+            component = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area / silhouette_area >= 0.04:
+                guarded_holes |= component
+            else:
+                white_material_mask |= component
+        hole_mask = guarded_holes
+
+    hole_area = int(np.count_nonzero(hole_mask))
+    if len(confidences) > 1 and (hole_area / silhouette_area if silhouette_area else 0.0) < 0.04:
+        white_material_mask |= hole_mask
+        hole_mask = np.zeros_like(hole_mask, dtype=bool)
+        confidences = []
+        hole_area = 0
+    white_material_area = int(np.count_nonzero(white_material_mask))
     if not confidences:
         confidence = "none"
-    elif "high" in confidences and len(confidences) == len([c for c in confidences if c == "high"]):
+    elif all(confidence == "high" for confidence in confidences):
         confidence = "high"
-    elif "high" in confidences:
-        confidence = "medium"
     else:
         confidence = "medium"
 
-    return kept, {
+    return hole_mask, white_material_mask, {
         "holeAreaRatio": hole_area / image_area if image_area else 0.0,
         "holeComponentCount": len(confidences),
         "holeConfidence": confidence,
+        "internalWhiteAreaRatio": int(np.count_nonzero(internal_white)) / image_area if image_area else 0.0,
+        "internalWhiteComponentCount": internal_components,
+        "holeCandidateCount": len(confidences),
+        "whiteMaterialAreaRatio": white_material_area / image_area if image_area else 0.0,
+        "whiteMaterialComponentCount": white_material_components,
     }
 
 
@@ -254,37 +402,46 @@ def segment_source_product_layers(source_rgb: np.ndarray) -> dict[str, Any]:
     """Segment the foreground product from a mostly white source background."""
 
     height, width = source_rgb.shape[:2]
-    rgb_float = source_rgb.astype(np.int16)
-    white_distance = np.linalg.norm(rgb_float - 255, axis=2)
-    hsv = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2HSV)
     gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
-    saturation = hsv[:, :, 1]
-    white_candidate = (white_distance < 45) & (saturation < 35)
-    source_white_bg_ratio = float(np.mean(white_candidate))
-
     edges = cv2.Canny(gray, 35, 120)
-    edge_kernel = np.ones((3, 3), np.uint8)
-    edge_barrier = cv2.dilate(edges, edge_kernel, iterations=1) > 0
-    passable_background = white_candidate & ~edge_barrier
+    white_masks = _white_region_masks(source_rgb)
+    strict_white = white_masks["strictWhite"]
+    relaxed_white = white_masks["relaxedWhite"]
+    exterior_background_mask = _extract_exterior_background(source_rgb, relaxed_white, strict_white, edges)
+    source_white_bg_ratio = float(np.mean(exterior_background_mask))
+    border_strict_white = np.concatenate(
+        [
+            strict_white[0, :],
+            strict_white[-1, :],
+            strict_white[:, 0],
+            strict_white[:, -1],
+        ]
+    )
+    border_relaxed_white = np.concatenate(
+        [
+            relaxed_white[0, :],
+            relaxed_white[-1, :],
+            relaxed_white[:, 0],
+            relaxed_white[:, -1],
+        ]
+    )
+    border_strict_white_ratio = float(np.mean(border_strict_white))
+    border_relaxed_white_ratio = float(np.mean(border_relaxed_white))
 
-    count, labels = cv2.connectedComponents(passable_background.astype(np.uint8), connectivity=8)
-    if count <= 1:
-        flooded_background = np.zeros((height, width), dtype=bool)
-    else:
-        border_labels = _connected_border_labels(labels)
-        flooded_background = np.isin(labels, list(border_labels)) & passable_background
-
-    raw_foreground_mask = ~flooded_background
+    raw_foreground_mask = ~exterior_background_mask
     raw_foreground_mask = cv2.morphologyEx(raw_foreground_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
     raw_foreground_mask = cv2.morphologyEx(raw_foreground_mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
     filled_silhouette_mask = _fill_holes(_largest_components(raw_foreground_mask))
-    candidate_holes = filled_silhouette_mask & white_candidate
-    material_support_mask = filled_silhouette_mask & ~candidate_holes
-    hole_mask, hole_quality = _filter_hole_components(
+    material_seed_mask = filled_silhouette_mask & ~relaxed_white
+    internal_white = filled_silhouette_mask & relaxed_white & ~exterior_background_mask
+    hole_mask, _white_material_mask, hole_quality = _classify_internal_white_components(
         source_rgb,
-        candidate_holes,
-        material_support_mask,
+        internal_white,
+        material_seed_mask,
         filled_silhouette_mask,
+        exterior_background_mask,
+        relaxed_white,
+        edges,
     )
     material_mask = filled_silhouette_mask & ~hole_mask
 
@@ -307,19 +464,22 @@ def segment_source_product_layers(source_rgb: np.ndarray) -> dict[str, Any]:
         fill_ratio = filled_area / max(1, bbox.width * bbox.height)
 
     unsupported_reason = None
-    if source_white_bg_ratio < 0.60:
-        unsupported_reason = "unsupported_not_white_background"
-    elif area_ratio < 0.005:
+    if area_ratio < 0.005:
         unsupported_reason = "unsupported_mask_too_small"
-    elif area_ratio > 0.45:
+    elif area_ratio > 0.55 and fill_ratio < 0.12:
         unsupported_reason = "unsupported_mask_too_large"
 
     confidence = "high"
     if unsupported_reason:
         confidence = "low"
-    elif fill_ratio < 0.15 or source_white_bg_ratio < 0.70 or area_ratio < 0.02 or filled_area_ratio > 0.45:
+    elif (
+        fill_ratio < 0.15
+        or area_ratio < 0.02
+        or filled_area_ratio > 0.55
+        or (border_relaxed_white_ratio < 0.40 and source_white_bg_ratio < 0.20)
+    ):
         confidence = "low"
-    elif source_white_bg_ratio < 0.85:
+    elif source_white_bg_ratio < 0.65 or border_strict_white_ratio < 0.75:
         confidence = "medium"
 
     return {
@@ -333,6 +493,9 @@ def segment_source_product_layers(source_rgb: np.ndarray) -> dict[str, Any]:
         "confidence": confidence,
         "quality": {
             "sourceWhiteBgRatio": source_white_bg_ratio,
+            "exteriorBackgroundAreaRatio": source_white_bg_ratio,
+            "borderStrictWhiteRatio": border_strict_white_ratio,
+            "borderRelaxedWhiteRatio": border_relaxed_white_ratio,
             "maskAreaRatio": area_ratio,
             "materialAreaRatio": area_ratio,
             "filledSilhouetteAreaRatio": filled_area_ratio,
@@ -519,6 +682,13 @@ def compute_layered_metrics(source_rgb: np.ndarray, result_rgb: np.ndarray, laye
     contour_values = abs_diff[contour_band_mask]
     contour_edge_diff = float(np.mean(contour_values)) if contour_values.size else material_mean_diff
     hole_mean_diff = float(np.mean(abs_diff[hole_mask])) if np.any(hole_mask) else None
+    hole_nonwhite_result_ratio = None
+    if np.any(hole_mask):
+        result_hsv = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2HSV)
+        result_sat = result_hsv[:, :, 1]
+        result_white_distance = np.linalg.norm(result_rgb.astype(np.int16) - 255, axis=2)
+        result_white = (result_white_distance < 55) & (result_sat < 45)
+        hole_nonwhite_result_ratio = float(1.0 - np.mean(result_white[hole_mask]))
 
     lab_source = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     lab_result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
@@ -550,6 +720,7 @@ def compute_layered_metrics(source_rgb: np.ndarray, result_rgb: np.ndarray, laye
         "holeMeanDiff": hole_mean_diff,
         "holeClosureScore": hole_closure_score,
         "holeBoundaryDiff": hole_boundary_diff,
+        "holeNonWhiteResultRatio": hole_nonwhite_result_ratio,
         "meanAbsDiff": material_mean_diff,
         "p90AbsDiff": material_p90_diff,
         "labDeltaMean": material_lab_delta_mean,
@@ -652,14 +823,13 @@ def _geometry_signal(metrics: dict[str, Any], material: dict[str, Any]) -> dict[
 def _hole_signal(metrics: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
     hole_closure_score = metrics.get("holeClosureScore")
     hole_boundary_diff = metrics.get("holeBoundaryDiff")
+    hole_mean_diff = metrics.get("holeMeanDiff")
+    hole_nonwhite_result_ratio = metrics.get("holeNonWhiteResultRatio")
     hole_confidence = str(quality.get("holeConfidence") or "none")
 
     severity = "none"
     filled = False
-    if hole_closure_score is not None and float(hole_closure_score) > 0.45:
-        severity = "severe"
-        filled = True
-    elif hole_boundary_diff is not None and float(hole_boundary_diff) > 0.42:
+    if hole_boundary_diff is not None and float(hole_boundary_diff) > 0.42:
         severity = "moderate"
     elif hole_boundary_diff is not None and float(hole_boundary_diff) > 0.30:
         severity = "mild"
@@ -670,6 +840,8 @@ def _hole_signal(metrics: dict[str, Any], quality: dict[str, Any]) -> dict[str, 
         "holeConfidence": hole_confidence,
         "holeClosureScore": None if hole_closure_score is None else float(hole_closure_score),
         "holeBoundaryDiff": None if hole_boundary_diff is None else float(hole_boundary_diff),
+        "holeMeanDiff": None if hole_mean_diff is None else float(hole_mean_diff),
+        "holeNonWhiteResultRatio": None if hole_nonwhite_result_ratio is None else float(hole_nonwhite_result_ratio),
     }
 
 
@@ -729,8 +901,6 @@ def score_product_v3(metrics: dict[str, Any], quality: dict[str, Any]) -> tuple[
         tags.append("silhouette_damage")
     if geometry["severity"] in {"moderate", "severe"} and material_p90_diff > 0.22:
         tags.append("foreground_overlap")
-    if hole["filled"]:
-        tags.append("hole_filled")
     if material_p90_diff > 0.45 and material_mean_diff < 0.24:
         tags.append("artifact")
 
@@ -741,10 +911,7 @@ def score_product_v3(metrics: dict[str, Any], quality: dict[str, Any]) -> tuple[
         "moderate" if alignment["severity"] == "moderate" else "none",
     )
 
-    if hole["filled"]:
-        score = 2
-        reasons.append("hard cap 2: hole filled")
-    elif material["severity"] == "severe" or geometry["severity"] == "severe":
+    if material["severity"] == "severe" or geometry["severity"] == "severe":
         score = 2
         reasons.append("hard cap 2: severe product damage")
     elif worst_severity == "moderate":
@@ -762,7 +929,7 @@ def score_product_v3(metrics: dict[str, Any], quality: dict[str, Any]) -> tuple[
         reasons.append(f"alignment {alignment['severity']}")
     if registration_jitter:
         reasons.append("small offset matched as registration jitter")
-    if hole["severity"] != "none" and not hole["filled"]:
+    if hole["severity"] != "none":
         reasons.append(f"hole boundary {hole['severity']}")
 
     if not tags and score < 3:
@@ -782,7 +949,7 @@ def score_product_v3(metrics: dict[str, Any], quality: dict[str, Any]) -> tuple[
         reasons.append("material stable")
     if contour_edge_diff > 0.24 and score >= 4:
         reasons.append("edge change treated as soft evidence")
-    if quality.get("holeConfidence") in {"medium", "high"} and "hole_filled" not in tags:
+    if quality.get("holeConfidence") in {"medium", "high"}:
         reasons.append("hole preserved")
 
     return score, tags, reasons, damage_signals
@@ -838,6 +1005,7 @@ def analyze_pair(source_rgb: np.ndarray, result_rgb: np.ndarray) -> dict[str, An
         "holeMeanDiff": _round_float(metrics["holeMeanDiff"]),
         "holeClosureScore": _round_float(metrics["holeClosureScore"]),
         "holeBoundaryDiff": _round_float(metrics["holeBoundaryDiff"]),
+        "holeNonWhiteResultRatio": _round_float(metrics["holeNonWhiteResultRatio"]),
         "meanAbsDiff": _round_float(metrics["meanAbsDiff"]),
         "p90AbsDiff": _round_float(metrics["p90AbsDiff"]),
         "labDeltaMean": _round_float(metrics["labDeltaMean"]),

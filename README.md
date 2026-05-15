@@ -76,7 +76,7 @@ During import, both `pnpm run import:resource` and the local review server emit 
 
 ## Product Consistency Check
 
-Product Check v3 is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a mostly white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
+Product Check v3.2 is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a pure or near-white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
 
 Install the Python dependencies once:
 
@@ -150,16 +150,22 @@ Current algorithm boundary:
 
 - Requires source and result images to have the same dimensions; otherwise returns `unsupported_size_mismatch`.
 - Segments the source product into `materialMask`, `filledSilhouetteMask`, `holeMask`, and `contourBandMask`.
-- Treats high-confidence white/low-saturation enclosed areas as holes instead of product material. Hole background changes are not product damage; hole filling can cap the score at 2.
-- Computes layered metrics such as `materialMeanDiff`, `materialP90Diff`, `materialSsim`, `materialNcc`, `contourEdgeDiff`, `holeMeanDiff`, `holeClosureScore`, and `holeBoundaryDiff`.
+- Treats a white image border as a segmentation prior, not a hard whole-image rule. Products may touch one or more image edges, and small non-perfect-white background variation is allowed.
+- Extracts the exterior background as only the near-white area connected to the image border. Internal white areas are not automatically treated as background.
+- Classifies internal white connected components before scoring: white labels, white product bodies, highlights, and printed white material stay in `materialMask`; high-confidence openings such as rings or bag-handle holes move to `holeMask`.
+- Uses a conservative material fallback: uncertain internal white areas stay in `materialMask` so product labels and white material are still checked for changes.
+- Excludes `holeMask` from the primary material comparison. Hole background changes and possible hole filling are diagnostic only, so they do not cap the suggested score by themselves.
+- Computes layered metrics such as `materialMeanDiff`, `materialP90Diff`, `materialSsim`, `materialNcc`, `contourEdgeDiff`, `holeMeanDiff`, `holeClosureScore`, `holeBoundaryDiff`, and `holeNonWhiteResultRatio`.
 - Keeps legacy metric aliases such as `meanAbsDiff`, `p90AbsDiff`, `edgeBandDiff`, `ssim`, and `ncc` for frontend compatibility.
 - Converts related metrics into `damageSignals` for `alignment`, `material`, `geometry`, and `hole`; each signal has a `none`, `mild`, `moderate`, or `severe` severity.
-- Uses hard gates for protected-product movement, severe material mismatch, severe product damage, and hole filling. Clear protected-product movement is a score 1 failure.
+- Uses hard gates for protected-product movement, severe material mismatch, and severe product damage. Clear protected-product movement is a score 1 failure.
 - Maps the worst confirmed damage severity to the score instead of stacking correlated penalties from `SSIM`, `NCC`, and contour metrics.
 - Does not let `contourEdgeDiff` / `edgeBandDiff` alone force a 2 score. Contour changes are supporting evidence unless material or match signals confirm product damage.
 - Keeps a guardrail that checked items without hard product-damage tags do not drop below 3, and low material diff with a strong match does not drop below 4.
-- Emits advisory tags such as `product_changed`, `product_moved`, `silhouette_damage`, `foreground_overlap`, `hole_filled`, and `artifact`.
+- Emits advisory tags such as `product_changed`, `product_moved`, `silhouette_damage`, `foreground_overlap`, and `artifact`. `hole_filled` is intentionally not emitted in v3.2 because hole contents are excluded from product-material scoring.
 - Returns `suggestedScore: null` for unsupported cases instead of guessing.
+
+Useful v3.2 mask diagnostics include `exteriorBackgroundAreaRatio`, `borderStrictWhiteRatio`, `borderRelaxedWhiteRatio`, `internalWhiteAreaRatio`, `internalWhiteComponentCount`, `whiteMaterialAreaRatio`, `whiteMaterialComponentCount`, `holeAreaRatio`, `holeComponentCount`, and `holeConfidence`.
 
 Product-preservation score semantics:
 
@@ -168,7 +174,7 @@ Product-preservation score semantics:
 | 5 | Product is materially stable; scene/background-only changes are acceptable. |
 | 4 | Mild product-adjacent evidence such as edge, shadow, or small structural drift, without confirmed product damage. |
 | 3 | Moderate material or geometry evidence that needs reviewer attention, but no hard failure. |
-| 2 | Confirmed severe product damage or hole filling. |
+| 2 | Confirmed severe product damage. |
 | 1 | Protected product moved, or the material match is too poor to treat as the same product. |
 
 ## Local Access
