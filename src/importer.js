@@ -31,6 +31,7 @@ const IMAGE_EXTENSIONS = new Map([
   ["image/avif", ".avif"],
 ]);
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+export const MAX_UPLOAD_JSON_BYTES = 50 * 1024 * 1024;
 const DEFAULT_CACHE_WORKERS = 4;
 
 export function normalizeWorkerCount(value, fallback = DEFAULT_CACHE_WORKERS) {
@@ -309,6 +310,10 @@ export function normalizeResourceFileName(file) {
   return name;
 }
 
+export function normalizeUploadedJsonFileName(file) {
+  return normalizeResourceFileName(file);
+}
+
 export async function listResourceJsonFiles() {
   const files = (await readdir(resourceDir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
@@ -347,18 +352,9 @@ async function readResourceRecords({ files: selectedFiles = [] } = {}) {
     try {
       const raw = await readFile(path.join(resourceDir, file), "utf8");
       const payload = JSON.parse(raw);
-      const items = normalizeJsonPayload(payload);
-      items.forEach((item, index) => {
-        try {
-          records.push(normalizeRecord(item, file, index));
-        } catch (error) {
-          errors.push({
-            file,
-            index,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      });
+      const parsed = recordsFromJsonPayload(payload, file);
+      records.push(...parsed.records);
+      errors.push(...parsed.errors);
     } catch (error) {
       errors.push({
         file,
@@ -369,6 +365,49 @@ async function readResourceRecords({ files: selectedFiles = [] } = {}) {
   }
 
   return { records, errors, files };
+}
+
+function recordsFromJsonPayload(payload, sourceFile) {
+  const records = [];
+  const errors = [];
+  const items = normalizeJsonPayload(payload);
+  items.forEach((item, index) => {
+    try {
+      records.push(normalizeRecord(item, sourceFile, index));
+    } catch (error) {
+      errors.push({
+        file: sourceFile,
+        index,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+  return { records, errors };
+}
+
+function readUploadedRecords({ fileName, content }) {
+  const sourceFile = normalizeUploadedJsonFileName(fileName);
+  const raw = String(content ?? "");
+  const byteLength = Buffer.byteLength(raw, "utf8");
+  if (byteLength > MAX_UPLOAD_JSON_BYTES) {
+    const error = new Error(`Uploaded JSON exceeds ${MAX_UPLOAD_JSON_BYTES} bytes`);
+    error.statusCode = 413;
+    throw error;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    const error = new Error("Uploaded file is not valid JSON");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    ...recordsFromJsonPayload(payload, sourceFile),
+    files: [sourceFile],
+  };
 }
 
 async function writeImportRunSummary(batchId, summary) {
@@ -459,23 +498,25 @@ async function cacheRecordImages({ record, batchId, itemId, itemIndex, total, do
   return patch;
 }
 
-export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress, cacheWorkers } = {}) {
+async function importRecordsBatch({
+  batchName,
+  downloadImages = true,
+  sourceDir,
+  sourceFile,
+  importedFiles,
+  records,
+  errors,
+  onProgress,
+  cacheWorkers,
+}) {
   initializeDatabase();
-
-  if (files.length !== 1) {
-    const error = new Error("Exactly one resource JSON file must be selected for import");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const sourceFile = normalizeResourceFileName(files[0]);
   const startedAt = nowIso();
   emitProgress(onProgress, {
     type: "import:start",
     sourceFile,
+    sourceDir,
     downloadImages,
   });
-  const { records, errors, files: importedFiles } = await readResourceRecords({ files });
   const date = new Date();
   const batchId = batchIdForDate(date);
   const name = batchName || sourceFile;
@@ -484,7 +525,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   createBatch({
     id: batchId,
     name,
-    sourceDir: "resource",
+    sourceDir,
     sourceFile,
     importedAt,
   });
@@ -492,6 +533,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     type: "import:parsed",
     batchId,
     sourceFile,
+    sourceDir,
     parsed: records.length,
     parseErrors: errors.length,
   });
@@ -620,7 +662,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
       id: batchId,
       name,
       importedAt,
-      sourceDir: "resource",
+      sourceDir,
       sourceFile,
     },
     files: importedFiles,
@@ -639,6 +681,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
 
   result.importRun = await writeImportRunSummary(batchId, {
     batchId,
+    sourceDir,
     sourceFile,
     startedAt,
     finishedAt: nowIso(),
@@ -654,6 +697,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   emitProgress(onProgress, {
     type: "import:finish",
     batchId,
+    sourceDir,
     sourceFile,
     parsed: result.parsed,
     inserted,
@@ -665,4 +709,42 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   });
 
   return result;
+}
+
+export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress, cacheWorkers } = {}) {
+  if (files.length !== 1) {
+    const error = new Error("Exactly one resource JSON file must be selected for import");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sourceFile = normalizeResourceFileName(files[0]);
+  const { records, errors, files: importedFiles } = await readResourceRecords({ files: [sourceFile] });
+  return importRecordsBatch({
+    batchName,
+    cacheWorkers,
+    downloadImages,
+    errors,
+    importedFiles,
+    onProgress,
+    records,
+    sourceDir: "resource",
+    sourceFile,
+  });
+}
+
+export async function importUploadedJsonBatch({ batchName, content, downloadImages = true, fileName, onProgress, cacheWorkers } = {}) {
+  const sourceFile = normalizeUploadedJsonFileName(fileName);
+  const { records, errors, files: importedFiles } = readUploadedRecords({ fileName: sourceFile, content });
+  return importRecordsBatch({
+    batchName,
+    cacheWorkers,
+    downloadImages,
+    errors,
+    importedFiles,
+    onProgress,
+    records,
+    sourceDir: "upload",
+    sourceFile,
+  });
 }

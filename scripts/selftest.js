@@ -5,7 +5,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { importResourceBatch } from "../src/importer.js";
+import { importResourceBatch, importUploadedJsonBatch } from "../src/importer.js";
 import {
   createBatch,
   getBatchStats,
@@ -13,6 +13,7 @@ import {
   getItemsForBatch,
   insertItem,
   saveEvaluation,
+  setItemExclusion,
   updateBatchCounts,
   updateSingleImageCacheStatus,
 } from "../src/db.js";
@@ -25,6 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const testBatchId = `selftest-batch-${randomUUID()}`;
 const testItemId = `selftest-item-${randomUUID()}`;
+const secondTestItemId = `selftest-item-${randomUUID()}`;
 const now = new Date().toISOString();
 const importProgressEvents = [];
 const onePixelPng = Buffer.from(
@@ -129,13 +131,34 @@ try {
     importKey: randomUUID(),
     createdAt: now,
   });
+  insertItem({
+    id: secondTestItemId,
+    batchId: testBatchId,
+    rawJsonFile: "selftest.json",
+    rawIndex: 1,
+    model: "selftest-model",
+    text: "selftest second source prompt",
+    url: "https://example.test/source-2.png",
+    resultUrl: "https://example.test/result-2.png",
+    optimizationPrompt: "selftest second optimized prompt",
+    sourceImagePath: null,
+    resultImagePath: "data/cache/selftest/result-2.png",
+    sourceFetchStatus: "failed",
+    resultFetchStatus: "success",
+    sourceFetchError: "initial source failure",
+    resultFetchError: null,
+    importKey: randomUUID(),
+    createdAt: now,
+  });
 
   updateBatchCounts(testBatchId);
   let testStats = getBatchStats(testBatchId).summary;
-  assert.equal(testStats.total_items, 1);
+  assert.equal(testStats.total_items, 2);
+  assert.equal(testStats.all_items, 2);
+  assert.equal(testStats.excluded_items, 0);
   assert.equal(testStats.reviewed_items, 0);
   assert.equal(testStats.cached_source_images, 0);
-  assert.equal(testStats.cached_result_images, 1);
+  assert.equal(testStats.cached_result_images, 2);
 
   const evaluation = saveEvaluation(testItemId, {
     product_preservation_score: 5,
@@ -171,7 +194,7 @@ try {
 
   testStats = getBatchStats(testBatchId).summary;
   assert.equal(testStats.cached_source_images, 1);
-  assert.equal(testStats.cached_result_images, 1);
+  assert.equal(testStats.cached_result_images, 2);
 
   updateSingleImageCacheStatus(testItemId, "result", {
     imagePath: testItem.result_image_path,
@@ -189,7 +212,7 @@ try {
 
   testStats = getBatchStats(testBatchId).summary;
   assert.equal(testStats.cached_source_images, 1);
-  assert.equal(testStats.cached_result_images, 0);
+  assert.equal(testStats.cached_result_images, 1);
   assert.throws(
     () =>
       updateSingleImageCacheStatus(testItemId, "thumbnail", {
@@ -199,6 +222,64 @@ try {
       }),
     /Invalid image kind/
   );
+
+  let byModel = getBatchStats(testBatchId).by_model[0];
+  assert.equal(byModel.total_items, 2);
+  assert.equal(byModel.reviewed_items, 1);
+  assert.deepEqual(getBatchStats(testBatchId).tag_counts, [{ tag: "excellent", count: 1 }]);
+
+  const excludedItem = setItemExclusion(testItemId, {
+    excluded: true,
+    reason: "not_evaluable",
+    note: "exclude from selftest stats",
+  });
+  assert.equal(excludedItem.is_excluded, 1);
+  assert.equal(excludedItem.exclude_reason, "not_evaluable");
+  assert.equal(excludedItem.exclude_note, "exclude from selftest stats");
+
+  const orderedItems = getItemsForBatch(testBatchId);
+  assert.equal(orderedItems.length, 2);
+  assert.equal(orderedItems[0].id, secondTestItemId);
+  assert.equal(orderedItems[1].id, testItemId);
+  assert.equal(orderedItems[1].is_excluded, 1);
+
+  testStats = getBatchStats(testBatchId).summary;
+  assert.equal(testStats.total_items, 1);
+  assert.equal(testStats.excluded_items, 1);
+  assert.equal(testStats.all_items, 2);
+  assert.equal(testStats.reviewed_items, 0);
+  assert.equal(testStats.cached_source_images, 0);
+  assert.equal(testStats.cached_result_images, 1);
+  byModel = getBatchStats(testBatchId).by_model[0];
+  assert.equal(byModel.total_items, 1);
+  assert.equal(byModel.reviewed_items, 0);
+  assert.deepEqual(getBatchStats(testBatchId).tag_counts, []);
+
+  assert.throws(
+    () =>
+      setItemExclusion(secondTestItemId, {
+        excluded: true,
+        reason: "not-a-real-reason",
+        note: "",
+      }),
+    /Invalid exclude reason/
+  );
+  assert.throws(
+    () =>
+      setItemExclusion(secondTestItemId, {
+        excluded: true,
+        reason: "other",
+        note: "x".repeat(501),
+      }),
+    /500 characters or less/
+  );
+
+  const restoredItem = setItemExclusion(testItemId, { excluded: false });
+  assert.equal(restoredItem.is_excluded, 0);
+  testStats = getBatchStats(testBatchId).summary;
+  assert.equal(testStats.total_items, 2);
+  assert.equal(testStats.excluded_items, 0);
+  assert.equal(testStats.reviewed_items, 1);
 } finally {
   db.exec("ROLLBACK");
 }
@@ -300,6 +381,74 @@ try {
   db.exec("ROLLBACK");
   if (existsSync(selftestResourcePath)) unlinkSync(selftestResourcePath);
   if (selftestImportRunPath && existsSync(selftestImportRunPath)) unlinkSync(selftestImportRunPath);
+}
+
+db.exec("BEGIN");
+try {
+  const uploadResult = await importUploadedJsonBatch({
+    fileName: "selftest-upload.json",
+    content: JSON.stringify([
+      {
+        provider: "selftest-upload-model",
+        params: {
+          content: [
+            { text: "selftest uploaded prompt" },
+            { url: "https://example.test/upload-source.png" },
+          ],
+        },
+        optimizationPrompt: "selftest uploaded optimized prompt",
+        resultUrl: "https://example.test/upload-result.png",
+      },
+    ]),
+    downloadImages: false,
+  });
+  assert.equal(uploadResult.batch.sourceDir, "upload");
+  assert.equal(uploadResult.batch.sourceFile, "selftest-upload.json");
+  assert.equal(uploadResult.parsed, 1);
+  assert.equal(uploadResult.inserted, 1);
+  const uploadedItem = getItemsForBatch(uploadResult.batch.id)[0];
+  assert.equal(uploadedItem.model, "selftest-upload-model");
+  assert.equal(uploadedItem.raw_json_file, "selftest-upload.json");
+  assert.equal(uploadedItem.source_fetch_status, "skipped");
+  assert.equal(existsSync(path.join(rootDir, "resource", "selftest-upload.json")), false);
+  if (uploadResult.importRun) {
+    const uploadImportRunPath = path.join(rootDir, uploadResult.importRun);
+    if (existsSync(uploadImportRunPath)) unlinkSync(uploadImportRunPath);
+  }
+
+  const uploadWithBadItem = await importUploadedJsonBatch({
+    fileName: "selftest-upload-bad.json",
+    content: JSON.stringify([{ model: "missing-fields" }]),
+    downloadImages: false,
+  });
+  assert.equal(uploadWithBadItem.parsed, 0);
+  assert.equal(uploadWithBadItem.inserted, 0);
+  assert.equal(uploadWithBadItem.errors.length, 1);
+  if (uploadWithBadItem.importRun) {
+    const badUploadImportRunPath = path.join(rootDir, uploadWithBadItem.importRun);
+    if (existsSync(badUploadImportRunPath)) unlinkSync(badUploadImportRunPath);
+  }
+
+  await assert.rejects(
+    () =>
+      importUploadedJsonBatch({
+        fileName: "selftest-upload.txt",
+        content: "[]",
+        downloadImages: false,
+      }),
+    /Resource file must be a JSON file/
+  );
+  await assert.rejects(
+    () =>
+      importUploadedJsonBatch({
+        fileName: "selftest-upload.json",
+        content: "{not-json",
+        downloadImages: false,
+      }),
+    /not valid JSON/
+  );
+} finally {
+  db.exec("ROLLBACK");
 }
 
 const task = createTask("selftest", {

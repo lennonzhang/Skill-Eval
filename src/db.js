@@ -23,6 +23,8 @@ const evaluationColumns = [
   "created_at",
   "updated_at",
 ];
+const excludeReasons = new Set(["bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"]);
+const EXCLUDE_NOTE_MAX_LENGTH = 500;
 
 export function initializeDatabase() {
   if (db) return db;
@@ -34,6 +36,7 @@ export function initializeDatabase() {
   // Schema source of truth. Keep column intent here instead of a separate schema.sql:
   // batches.source_file records the exact resource JSON basename for one-JSON-one-batch imports.
   // items.raw_json_file/raw_index preserve traceability without storing external URLs in reports.
+  // items.excluded_at/exclude_reason/exclude_note are soft exclusion metadata; excluded rows stay visible but leave review stats.
   // evaluations stores human review only; automated Product Check remains advisory file output.
   db.exec(`
     CREATE TABLE IF NOT EXISTS batches (
@@ -66,11 +69,15 @@ export function initializeDatabase() {
       result_fetch_error TEXT,
       import_key TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      excluded_at TEXT,
+      exclude_reason TEXT,
+      exclude_note TEXT,
       UNIQUE(batch_id, import_key)
     );
 
   `);
   ensureBatchSchema();
+  ensureItemSchema();
   ensureEvaluationSchema();
 
   return db;
@@ -82,6 +89,20 @@ function ensureBatchSchema() {
   if (!existingColumns.includes("source_file")) {
     // Backfill-compatible migration for databases created before one JSON became one batch.
     db.exec("ALTER TABLE batches ADD COLUMN source_file TEXT");
+  }
+}
+
+function ensureItemSchema() {
+  const existing = db.prepare("PRAGMA table_info(items)").all();
+  const existingColumns = existing.map((column) => column.name);
+  if (!existingColumns.includes("excluded_at")) {
+    db.exec("ALTER TABLE items ADD COLUMN excluded_at TEXT");
+  }
+  if (!existingColumns.includes("exclude_reason")) {
+    db.exec("ALTER TABLE items ADD COLUMN exclude_reason TEXT");
+  }
+  if (!existingColumns.includes("exclude_note")) {
+    db.exec("ALTER TABLE items ADD COLUMN exclude_note TEXT");
   }
 }
 
@@ -208,7 +229,8 @@ export function updateBatchCounts(batchId) {
         SUM(CASE WHEN source_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_source_count,
         SUM(CASE WHEN result_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_result_count
        FROM items
-       WHERE batch_id = ?`
+       WHERE batch_id = ?
+         AND excluded_at IS NULL`
     )
     .get(batchId);
 
@@ -232,9 +254,15 @@ export function getBatches() {
   return getDatabase()
     .prepare(
       `SELECT
-        b.*,
-        COUNT(i.id) AS item_count,
-        SUM(CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_count
+        b.id,
+        b.name,
+        b.source_dir,
+        b.source_file,
+        b.imported_at,
+        b.notes,
+        SUM(CASE WHEN i.id IS NOT NULL AND i.excluded_at IS NULL THEN 1 ELSE 0 END) AS item_count,
+        SUM(CASE WHEN i.id IS NOT NULL AND i.excluded_at IS NOT NULL THEN 1 ELSE 0 END) AS excluded_count,
+        SUM(CASE WHEN i.id IS NOT NULL AND i.excluded_at IS NULL AND e.id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_count
        FROM batches b
        LEFT JOIN items i ON i.batch_id = b.id
        LEFT JOIN evaluations e ON e.item_id = i.id
@@ -259,11 +287,16 @@ export function getItemsForBatch(batchId) {
         e.status,
         e.tags,
         e.comment,
-        e.updated_at AS evaluation_updated_at
+        e.updated_at AS evaluation_updated_at,
+        CASE WHEN i.excluded_at IS NULL THEN 0 ELSE 1 END AS is_excluded
        FROM items i
        LEFT JOIN evaluations e ON e.item_id = i.id
        WHERE i.batch_id = ?
-       ORDER BY i.raw_json_file ASC, i.raw_index ASC, i.model ASC`
+       ORDER BY
+         CASE WHEN i.excluded_at IS NULL THEN 0 ELSE 1 END ASC,
+         i.raw_json_file ASC,
+         i.raw_index ASC,
+         i.model ASC`
     )
     .all(batchId)
     .map((item) => ({
@@ -280,6 +313,81 @@ export function getItemById(itemId) {
 
 export function itemExists(itemId) {
   return Boolean(getDatabase().prepare("SELECT 1 FROM items WHERE id = ?").get(itemId));
+}
+
+function normalizeExcludeInput(input) {
+  const excluded = Boolean(input?.excluded);
+  if (!excluded) {
+    return {
+      excluded: false,
+      reason: null,
+      note: null,
+    };
+  }
+
+  const reason = String(input.reason || "").trim();
+  if (!excludeReasons.has(reason)) {
+    const error = new Error("Invalid exclude reason");
+    error.statusCode = 400;
+    error.issues = [...excludeReasons].sort();
+    throw error;
+  }
+
+  const note = String(input.note || "").trim();
+  if (note.length > EXCLUDE_NOTE_MAX_LENGTH) {
+    const error = new Error(`Exclude note must be ${EXCLUDE_NOTE_MAX_LENGTH} characters or less`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    excluded: true,
+    reason,
+    note,
+  };
+}
+
+export function setItemExclusion(itemId, input) {
+  const item = getItemById(itemId);
+  if (!item) {
+    const error = new Error("Item not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const normalized = normalizeExcludeInput(input);
+  if (normalized.excluded) {
+    getDatabase()
+      .prepare(
+        `UPDATE items
+         SET excluded_at = ?,
+             exclude_reason = ?,
+             exclude_note = ?
+         WHERE id = ?`
+      )
+      .run(nowIso(), normalized.reason, normalized.note, itemId);
+  } else {
+    getDatabase()
+      .prepare(
+        `UPDATE items
+         SET excluded_at = NULL,
+             exclude_reason = NULL,
+             exclude_note = NULL
+         WHERE id = ?`
+      )
+      .run(itemId);
+  }
+
+  updateBatchCounts(item.batch_id);
+  const updated = getItemById(itemId);
+  return {
+    id: updated.id,
+    batch_id: updated.batch_id,
+    is_excluded: updated.excluded_at ? 1 : 0,
+    excluded_at: updated.excluded_at,
+    exclude_reason: updated.exclude_reason,
+    exclude_note: updated.exclude_note,
+  };
 }
 
 export function updateSingleImageCacheStatus(itemId, kind, patch) {
@@ -380,10 +488,12 @@ export function getBatchStats(batchId) {
   const summary = getDatabase()
     .prepare(
       `SELECT
-        COUNT(i.id) AS total_items,
-        SUM(CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_items,
-        SUM(CASE WHEN i.source_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_source_images,
-        SUM(CASE WHEN i.result_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_result_images
+        SUM(CASE WHEN i.excluded_at IS NULL THEN 1 ELSE 0 END) AS total_items,
+        SUM(CASE WHEN i.excluded_at IS NOT NULL THEN 1 ELSE 0 END) AS excluded_items,
+        COUNT(i.id) AS all_items,
+        SUM(CASE WHEN i.excluded_at IS NULL AND e.id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed_items,
+        SUM(CASE WHEN i.excluded_at IS NULL AND i.source_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_source_images,
+        SUM(CASE WHEN i.excluded_at IS NULL AND i.result_fetch_status = 'success' THEN 1 ELSE 0 END) AS cached_result_images
        FROM items i
        LEFT JOIN evaluations e ON e.item_id = i.id
        WHERE i.batch_id = ?`
@@ -406,6 +516,7 @@ export function getBatchStats(batchId) {
        FROM items i
        LEFT JOIN evaluations e ON e.item_id = i.id
        WHERE i.batch_id = ?
+         AND i.excluded_at IS NULL
        GROUP BY i.model
        ORDER BY avg_overall_score DESC, i.model ASC`
     )
@@ -416,7 +527,8 @@ export function getBatchStats(batchId) {
       `SELECT e.tags
        FROM evaluations e
        JOIN items i ON i.id = e.item_id
-       WHERE i.batch_id = ?`
+       WHERE i.batch_id = ?
+         AND i.excluded_at IS NULL`
     )
     .all(batchId);
 
@@ -430,6 +542,8 @@ export function getBatchStats(batchId) {
   return {
     summary: {
       total_items: summary.total_items || 0,
+      excluded_items: summary.excluded_items || 0,
+      all_items: summary.all_items || 0,
       reviewed_items: summary.reviewed_items || 0,
       unreviewed_items: (summary.total_items || 0) - (summary.reviewed_items || 0),
       cached_source_images: summary.cached_source_images || 0,

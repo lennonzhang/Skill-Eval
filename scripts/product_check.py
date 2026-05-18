@@ -1174,6 +1174,11 @@ def resolve_local_path(path_value: str | None) -> Path | None:
     return path
 
 
+def has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
 def fetch_rows(args: argparse.Namespace) -> tuple[list[sqlite3.Row], dict[str, Any]]:
     database_path = Path(args.database)
     if not database_path.is_absolute():
@@ -1189,9 +1194,13 @@ def fetch_rows(args: argparse.Namespace) -> tuple[list[sqlite3.Row], dict[str, A
         "model": args.model,
         "items": args.item or [],
         "all": bool(args.all),
+        "includeExcluded": bool(args.include_excluded),
     }
 
     try:
+        supports_exclusions = has_column(connection, "items", "excluded_at")
+        filters["supportsExclusions"] = supports_exclusions
+
         if args.item:
             placeholders = ",".join("?" for _ in args.item)
             rows = connection.execute(
@@ -1208,11 +1217,13 @@ def fetch_rows(args: argparse.Namespace) -> tuple[list[sqlite3.Row], dict[str, A
             return list(rows), filters
 
         if args.all:
+            excluded_filter = "" if args.include_excluded or not supports_exclusions else "WHERE i.excluded_at IS NULL"
             rows = connection.execute(
-                """
+                f"""
                 SELECT i.*, b.imported_at, b.name AS batch_name
                 FROM items i
                 JOIN batches b ON b.id = i.batch_id
+                {excluded_filter}
                 ORDER BY b.imported_at DESC, i.raw_json_file ASC, i.raw_index ASC
                 """
             ).fetchall()
@@ -1224,12 +1235,14 @@ def fetch_rows(args: argparse.Namespace) -> tuple[list[sqlite3.Row], dict[str, A
                 if not batch:
                     raise SystemExit("No batches found. Run pnpm run import:resource first.")
                 batch_id = batch["id"]
+            excluded_filter = "" if args.include_excluded or not supports_exclusions else "AND i.excluded_at IS NULL"
             rows = connection.execute(
-                """
+                f"""
                 SELECT i.*, b.imported_at, b.name AS batch_name
                 FROM items i
                 JOIN batches b ON b.id = i.batch_id
                 WHERE i.batch_id = ?
+                {excluded_filter}
                 ORDER BY i.raw_json_file ASC, i.raw_index ASC, i.model ASC
                 """,
                 (batch_id,),
@@ -1403,6 +1416,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", action="store_true", help="Analyze all batches.")
     parser.add_argument("--limit", type=int, help="Limit rows after filtering.")
     parser.add_argument("--visualize", action="store_true", help="Write source mask, match, and diff overlays.")
+    parser.add_argument("--include-excluded", action="store_true", help="Include items excluded from review statistics.")
     parser.add_argument(
         "--workers",
         type=int,

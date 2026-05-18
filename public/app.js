@@ -1,12 +1,16 @@
 import { calculateOverallScore, scoreFields, statusOptions, tagOptions } from "./scoring.js";
 
+const excludeReasons = ["bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"];
+
 const translations = {
   en: {
     "app.title": "Skill Eval Review",
     "app.language": "Language",
     "app.batch": "Batch",
     "actions.importResource": "Import Resource",
+    "actions.importUpload": "Import Upload",
     "actions.importing": "Importing...",
+    "actions.chooseJson": "Choose JSON",
     "actions.runProductCheck": "Run Product Check",
     "actions.runningProductCheck": "Running...",
     "actions.nextUnreviewed": "Next Unreviewed",
@@ -17,6 +21,9 @@ const translations = {
     "actions.browserCache": "Browser Cache",
     "actions.browserCaching": "Browser caching...",
     "actions.openRemoteUrl": "Open remote URL",
+    "actions.exclude": "Exclude",
+    "actions.restore": "Restore",
+    "actions.cancel": "Cancel",
     "task.import": "Import",
     "task.productCheck": "Product Check",
     "task.browserCache": "Browser Cache",
@@ -37,12 +44,16 @@ const translations = {
     "metrics.remaining": "Remaining",
     "metrics.sourceCache": "Source Cache",
     "metrics.resultCache": "Result Cache",
+    "metrics.excluded": "Excluded",
     "filters.aria": "Review filters",
     "filters.model": "Model",
     "filters.status": "Status",
     "filters.all": "All",
+    "filters.active": "All active",
     "filters.unreviewed": "Unreviewed",
     "filters.reviewed": "Reviewed",
+    "filters.excluded": "Excluded",
+    "filters.allIncludingExcluded": "All incl. excluded",
     "filters.search": "Search",
     "filters.searchPlaceholder": "Prompt, tag, file...",
     "filters.allModels": "All models",
@@ -67,6 +78,20 @@ const translations = {
     "review.comment": "Comment",
     "review.commentPlaceholder": "Reviewer notes",
     "review.tags": "Tags",
+    "review.excluded": "Excluded",
+    "review.excludeReason": "Reason",
+    "review.excludeNote": "Note",
+    "review.excludeNotePlaceholder": "Optional note",
+    "review.excludeConfirm": "Exclude item",
+    "review.excludeDescription": "Excluded items remain visible but do not count toward review statistics.",
+    "review.excludeState": "This item is excluded from statistics and review progress.",
+    "review.excludeSaved": "Exclusion updated",
+    "review.reason.bad_input": "Bad input",
+    "review.reason.duplicate": "Duplicate",
+    "review.reason.wrong_task": "Wrong task",
+    "review.reason.missing_image": "Missing image",
+    "review.reason.not_evaluable": "Not evaluable",
+    "review.reason.other": "Other",
     "review.originalPrompt": "Original Prompt",
     "review.optimizedPrompt": "Optimized Prompt",
     "productCheck.title": "Product Check",
@@ -87,6 +112,8 @@ const translations = {
     "productCheck.runStatus": "Product Check",
     "productCheck.notRun": "not run",
     "resources.none": "No JSON files",
+    "upload.none": "No file selected",
+    "upload.invalidJson": "Choose a .json file.",
     "empty.initialTitle": "Select or import a batch",
     "empty.initialBody": "Use the batch menu or import local resource JSON to begin.",
     "empty.noBatch": "No batch loaded",
@@ -153,7 +180,9 @@ const translations = {
     "app.language": "语言",
     "app.batch": "批次",
     "actions.importResource": "导入资源",
+    "actions.importUpload": "导入上传",
     "actions.importing": "导入中...",
+    "actions.chooseJson": "选择 JSON",
     "actions.runProductCheck": "运行产品检查",
     "actions.runningProductCheck": "检查中...",
     "actions.nextUnreviewed": "下一个未评审",
@@ -164,6 +193,9 @@ const translations = {
     "actions.browserCache": "浏览器缓存",
     "actions.browserCaching": "浏览器缓存中...",
     "actions.openRemoteUrl": "打开远程链接",
+    "actions.exclude": "排除",
+    "actions.restore": "恢复",
+    "actions.cancel": "取消",
     "task.import": "导入",
     "task.productCheck": "产品检查",
     "task.browserCache": "浏览器缓存",
@@ -184,12 +216,16 @@ const translations = {
     "metrics.remaining": "剩余",
     "metrics.sourceCache": "原图缓存",
     "metrics.resultCache": "结果缓存",
+    "metrics.excluded": "已排除",
     "filters.aria": "评审筛选",
     "filters.model": "模型",
     "filters.status": "状态",
     "filters.all": "全部",
+    "filters.active": "全部未排除",
     "filters.unreviewed": "未评审",
     "filters.reviewed": "已评审",
+    "filters.excluded": "已排除",
+    "filters.allIncludingExcluded": "包含已排除",
     "filters.search": "搜索",
     "filters.searchPlaceholder": "提示词、标签、文件...",
     "filters.allModels": "全部模型",
@@ -214,6 +250,20 @@ const translations = {
     "review.comment": "备注",
     "review.commentPlaceholder": "评审备注",
     "review.tags": "标签",
+    "review.excluded": "已排除",
+    "review.excludeReason": "原因",
+    "review.excludeNote": "备注",
+    "review.excludeNotePlaceholder": "可选备注",
+    "review.excludeConfirm": "排除条目",
+    "review.excludeDescription": "已排除条目仍可查看，但不参与评审统计。",
+    "review.excludeState": "此条目已从统计和评审进度中排除。",
+    "review.excludeSaved": "排除状态已更新",
+    "review.reason.bad_input": "输入异常",
+    "review.reason.duplicate": "重复条目",
+    "review.reason.wrong_task": "任务不符",
+    "review.reason.missing_image": "图片缺失",
+    "review.reason.not_evaluable": "不可评审",
+    "review.reason.other": "其他",
     "review.originalPrompt": "原始提示词",
     "review.optimizedPrompt": "优化提示词",
     "productCheck.title": "产品检查",
@@ -294,6 +344,8 @@ const translations = {
     "status.needs_recheck": "需复查",
     "status.failed": "失败",
     "resources.none": "没有 JSON 文件",
+    "upload.none": "未选择文件",
+    "upload.invalidJson": "请选择 .json 文件。",
   },
 };
 
@@ -308,6 +360,7 @@ const state = {
   batches: [],
   resources: [],
   selectedResourceFile: "",
+  selectedUploadFile: null,
   selectedBatchId: "",
   items: [],
   stats: null,
@@ -342,7 +395,10 @@ const els = {
   taskProgressStrip: document.querySelector("#taskProgressStrip"),
   batchSelect: document.querySelector("#batchSelect"),
   resourceSelect: document.querySelector("#resourceSelect"),
+  uploadJsonInput: document.querySelector("#uploadJsonInput"),
+  uploadJsonMeta: document.querySelector("#uploadJsonMeta"),
   importButton: document.querySelector("#importButton"),
+  uploadImportButton: document.querySelector("#uploadImportButton"),
   runProductCheckButton: document.querySelector("#runProductCheckButton"),
   totalItems: document.querySelector("#totalItems"),
   reviewedItems: document.querySelector("#reviewedItems"),
@@ -427,6 +483,10 @@ function isReviewed(item) {
   return item.overall_score !== null && item.overall_score !== undefined;
 }
 
+function isExcluded(item) {
+  return Boolean(item?.is_excluded);
+}
+
 function selectedBatch() {
   return state.batches.find((batch) => batch.id === state.selectedBatchId);
 }
@@ -434,21 +494,39 @@ function selectedBatch() {
 function filteredItems() {
   const query = state.filters.search.trim().toLowerCase();
   return state.items.filter((item) => {
+    const excluded = isExcluded(item);
     if (state.filters.model !== "all" && item.model !== state.filters.model) return false;
-    if (state.filters.status === "reviewed" && !isReviewed(item)) return false;
-    if (state.filters.status === "unreviewed" && isReviewed(item)) return false;
+    if (state.filters.status === "active" && excluded) return false;
+    if (state.filters.status === "excluded" && !excluded) return false;
+    if (state.filters.status === "reviewed" && (excluded || !isReviewed(item))) return false;
+    if (state.filters.status === "unreviewed" && (excluded || isReviewed(item))) return false;
     if (!query) return true;
     const haystack = [
       item.model,
       item.text,
       item.optimization_prompt,
       item.raw_json_file,
+      item.exclude_reason,
+      item.exclude_note,
       ...(Array.isArray(item.tags) ? item.tags : []),
     ]
       .join(" ")
       .toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function nextItemIdAfterExclusion(itemId) {
+  const visible = filteredItems();
+  const currentIndex = visible.findIndex((item) => item.id === itemId);
+  const orderedCandidates =
+    currentIndex >= 0
+      ? visible.slice(currentIndex + 1).concat(visible.slice(0, currentIndex))
+      : visible;
+  const nextVisibleTask = orderedCandidates.find((item) => item.id !== itemId && !isExcluded(item));
+  if (nextVisibleTask) return nextVisibleTask.id;
+
+  return state.items.find((item) => item.id !== itemId && !isExcluded(item))?.id || "";
 }
 
 function renderBatchSelect() {
@@ -480,6 +558,19 @@ function renderResourceSelect() {
   els.resourceSelect.value = state.selectedResourceFile;
 }
 
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.ceil(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function renderUploadImport() {
+  const file = state.selectedUploadFile;
+  els.uploadJsonMeta.textContent = file ? `${file.name} · ${formatFileSize(file.size)}` : t("upload.none");
+  els.uploadImportButton.disabled = !file || Boolean(state.importTask && ["queued", "running"].includes(state.importTask.status));
+}
+
 function renderMetrics() {
   const summary = state.stats?.summary || {};
   els.totalItems.textContent = summary.total_items || 0;
@@ -495,8 +586,10 @@ function renderMetrics() {
   }
   const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
   const sourceFile = batch.source_file ? ` | ${batch.source_file}` : "";
+  const excluded = Number(summary.excluded_items || batch.excluded_count || 0);
+  const excludedText = excluded ? ` | ${t("metrics.excluded")}: ${excluded}` : "";
   const runStatus = state.productCheckRun?.status || (state.productCheck ? "succeeded" : t("productCheck.notRun"));
-  els.batchMeta.textContent = `${batch.id}${sourceFile} | ${imported} | ${t("productCheck.runStatus")}: ${runStatus}`;
+  els.batchMeta.textContent = `${batch.id}${sourceFile} | ${imported}${excludedText} | ${t("productCheck.runStatus")}: ${runStatus}`;
 
   els.runProductCheckButton.disabled = !state.selectedBatchId || state.productCheckRun?.status === "running";
   els.runProductCheckButton.textContent =
@@ -641,11 +734,25 @@ function renderFilters() {
   if (state.filters.model !== "all" && !models.includes(state.filters.model)) {
     state.filters.model = "all";
   }
+  const statusFilterOptions = [
+    ["all", t("filters.allIncludingExcluded")],
+    ["active", t("filters.active")],
+    ["unreviewed", t("filters.unreviewed")],
+    ["reviewed", t("filters.reviewed")],
+    ["excluded", t("filters.excluded")],
+  ];
+  if (!statusFilterOptions.some(([value]) => value === state.filters.status)) {
+    state.filters.status = "all";
+  }
   els.modelFilter.innerHTML = [
     `<option value="all">${escapeHtml(t("filters.allModels"))}</option>`,
     ...models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`),
   ].join("");
   els.modelFilter.value = state.filters.model;
+  els.statusFilter.innerHTML = statusFilterOptions
+    .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
+    .join("");
+  els.statusFilter.value = state.filters.status;
 }
 
 function renderItemList() {
@@ -660,17 +767,21 @@ function renderItemList() {
   els.itemList.innerHTML = visible
     .map((item) => {
       const reviewed = isReviewed(item);
+      const excluded = isExcluded(item);
       const score = reviewed ? Number(item.overall_score).toFixed(2) : "--";
+      const statusClass = excluded ? "excluded" : reviewed ? "reviewed" : "unreviewed";
+      const statusLabel = excluded ? t("review.excluded") : reviewed ? score : t("review.open");
+      const rowMeta = excluded && item.exclude_reason ? t(`review.reason.${item.exclude_reason}`) : translatedFetchStatus(item.source_fetch_status);
       return `
-        <button class="item-row ${item.id === state.selectedItemId ? "active" : ""}" data-id="${escapeHtml(item.id)}" type="button">
+        <button class="item-row ${item.id === state.selectedItemId ? "active" : ""} ${excluded ? "excluded" : ""}" data-id="${escapeHtml(item.id)}" type="button">
           <div class="row-title">
             <span class="model-pill">${escapeHtml(item.model)}</span>
-            <span class="status-pill ${reviewed ? "reviewed" : "unreviewed"}">${reviewed ? score : t("review.open")}</span>
+            <span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span>
           </div>
           <div class="row-prompt">${escapeHtml(item.text)}</div>
           <div class="row-title">
             <span>${escapeHtml(item.raw_json_file)} #${item.raw_index + 1}</span>
-            <span>${escapeHtml(translatedFetchStatus(item.source_fetch_status))}/${escapeHtml(translatedFetchStatus(item.result_fetch_status))}</span>
+            <span>${escapeHtml(rowMeta)}/${escapeHtml(translatedFetchStatus(item.result_fetch_status))}</span>
           </div>
         </button>
       `;
@@ -982,6 +1093,8 @@ function renderProductCheck(item) {
 function captureReviewDraft(itemId) {
   const formEl = document.querySelector("#evaluationForm");
   if (!formEl || !itemId) return;
+  const item = state.items.find((candidate) => candidate.id === itemId);
+  if (isExcluded(item)) return;
   state.reviewDrafts[itemId] = {
     ...readScoreForm(formEl),
     status: formEl.elements.status.value,
@@ -1021,6 +1134,7 @@ function renderReviewPane() {
   const selectedTags = Array.isArray(draft?.tags) ? draft.tags : Array.isArray(item.tags) ? item.tags : [];
   const selectedStatus = draft?.status || item.status;
   const comment = draft?.comment ?? item.comment ?? "";
+  const excluded = isExcluded(item);
 
   els.reviewPane.innerHTML = `
     <div class="review-layout">
@@ -1031,6 +1145,8 @@ function renderReviewPane() {
             <p>${escapeHtml(t("review.itemMeta", { file: item.raw_json_file, index: item.raw_index + 1, id: item.id }))}</p>
           </div>
         </div>
+
+        ${renderExclusionPanel(item)}
 
         ${renderImageCompare(item)}
 
@@ -1048,7 +1164,7 @@ function renderReviewPane() {
         </div>
       </section>
 
-      <form id="evaluationForm" class="evaluation-sidebar">
+      <form id="evaluationForm" class="evaluation-sidebar ${excluded ? "excluded" : ""}">
         <div class="evaluation-sticky">
           <div class="evaluation-summary">
             <div>
@@ -1104,7 +1220,7 @@ function renderReviewPane() {
               ${tagOptions
                 .map(
                   (tag) => `
-                    <button class="tag-button ${selectedTags.includes(tag) ? "selected" : ""}" data-tag="${tag}" type="button">
+                    <button class="tag-button ${selectedTags.includes(tag) ? "selected" : ""}" data-tag="${tag}" type="button" ${excluded ? "disabled" : ""}>
                       ${tag}
                     </button>
                   `
@@ -1115,7 +1231,7 @@ function renderReviewPane() {
 
           <div class="save-row">
             <span class="save-note" id="saveNote">${item.evaluation_updated_at ? escapeHtml(t("review.savedAt", { time: new Date(item.evaluation_updated_at).toLocaleString() })) : escapeHtml(t("review.notReviewed"))}</span>
-            <button id="saveButton" type="submit">${escapeHtml(t("actions.saveReview"))}</button>
+            <button id="saveButton" type="submit" ${excluded ? "disabled" : ""}>${escapeHtml(t("actions.saveReview"))}</button>
           </div>
         </div>
       </form>
@@ -1124,6 +1240,11 @@ function renderReviewPane() {
 
   const formEl = document.querySelector("#evaluationForm");
   const currentTags = new Set(selectedTags);
+  if (excluded) {
+    for (const control of formEl.querySelectorAll("input, select, textarea")) {
+      control.disabled = true;
+    }
+  }
 
   ensureImageSizes(item);
 
@@ -1226,8 +1347,80 @@ function renderReviewPane() {
 
   formEl.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (isExcluded(item)) return;
     await saveEvaluation(item.id, formEl, [...currentTags]);
   });
+
+  const excludeForm = document.querySelector("#excludeForm");
+  if (excludeForm) {
+    excludeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const formData = new FormData(excludeForm);
+      const nextItemId = nextItemIdAfterExclusion(item.id);
+      try {
+        await updateItemExclusion(item.id, {
+          excluded: true,
+          reason: formData.get("reason"),
+          note: formData.get("note"),
+          nextItemId,
+        });
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  }
+
+  const restoreButton = document.querySelector("#restoreButton");
+  if (restoreButton) {
+    restoreButton.addEventListener("click", () => {
+      updateItemExclusion(item.id, { excluded: false }).catch((error) => alert(error.message));
+    });
+  }
+}
+
+function renderExclusionPanel(item) {
+  if (isExcluded(item)) {
+    const reason = item.exclude_reason ? t(`review.reason.${item.exclude_reason}`) : t("review.excluded");
+    const note = item.exclude_note ? `<p class="exclude-note">${escapeHtml(item.exclude_note)}</p>` : "";
+    return `
+      <aside class="exclude-panel exclude-panel--locked">
+        <div class="exclude-panel-copy">
+          <span class="exclude-kicker">${escapeHtml(t("review.excluded"))}</span>
+          <strong>${escapeHtml(reason)}</strong>
+          <p>${escapeHtml(t("review.excludeState"))}</p>
+          ${note}
+        </div>
+        <div class="exclude-actions">
+          <button id="restoreButton" class="secondary" type="button">${escapeHtml(t("actions.restore"))}</button>
+        </div>
+      </aside>
+    `;
+  }
+
+  return `
+    <form id="excludeForm" class="exclude-panel exclude-panel--active">
+      <div class="exclude-panel-copy">
+        <span class="exclude-kicker">${escapeHtml(t("actions.exclude"))}</span>
+        <strong>${escapeHtml(t("review.excludeConfirm"))}</strong>
+        <p>${escapeHtml(t("review.excludeDescription"))}</p>
+      </div>
+      <label class="exclude-field exclude-field--reason">
+        <span>${escapeHtml(t("review.excludeReason"))}</span>
+        <select name="reason" required>
+          ${excludeReasons
+            .map((reason) => `<option value="${escapeHtml(reason)}">${escapeHtml(t(`review.reason.${reason}`))}</option>`)
+            .join("")}
+        </select>
+      </label>
+      <label class="exclude-field exclude-field--note">
+        <span>${escapeHtml(t("review.excludeNote"))}</span>
+        <textarea name="note" maxlength="500" rows="1" placeholder="${escapeHtml(t("review.excludeNotePlaceholder"))}"></textarea>
+      </label>
+      <div class="exclude-actions">
+        <button class="secondary" type="submit">${escapeHtml(t("review.excludeConfirm"))}</button>
+      </div>
+    </form>
+  `;
 }
 
 function scoreRow(scoreField, value) {
@@ -1311,6 +1504,22 @@ async function saveEvaluation(itemId, formEl, tags) {
   saveNote.textContent = t("review.saved");
   delete state.reviewDrafts[itemId];
   await loadBatch(state.selectedBatchId, itemId);
+}
+
+async function updateItemExclusion(itemId, payload) {
+  captureReviewDraft(itemId);
+  const keepSelectedItemId = payload.nextItemId || itemId;
+  const body = await api(`/api/items/${encodeURIComponent(itemId)}/exclusion`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      excluded: payload.excluded,
+      reason: payload.reason,
+      note: payload.note,
+    }),
+  });
+  state.stats = body.stats;
+  delete state.reviewDrafts[itemId];
+  await loadBatch(state.selectedBatchId, keepSelectedItemId, { skipAutoBrowserCache: true });
 }
 
 async function retryImage(itemId, kind) {
@@ -1546,6 +1755,7 @@ function startImportTaskPolling(taskId) {
         stopImportTaskPolling();
         els.importButton.disabled = false;
         els.importButton.textContent = t("actions.importResource");
+        els.uploadImportButton.textContent = t("actions.importUpload");
         if (task.status === "succeeded" && task.batchId) {
           state.selectedBatchId = task.batchId;
           await loadBatch(task.batchId);
@@ -1564,6 +1774,7 @@ function startImportTaskPolling(taskId) {
       };
       els.importButton.disabled = false;
       els.importButton.textContent = t("actions.importResource");
+      els.uploadImportButton.textContent = t("actions.importUpload");
       render();
     }
   }, 1000);
@@ -1621,6 +1832,7 @@ function render() {
   applyStaticTranslations();
   renderBatchSelect();
   renderResourceSelect();
+  renderUploadImport();
   renderMetrics();
   renderTaskProgress();
   renderFilters();
@@ -1651,6 +1863,41 @@ async function importBatch() {
   }
 }
 
+async function importUploadedBatch() {
+  const file = state.selectedUploadFile;
+  if (!file) {
+    alert(t("upload.none"));
+    return;
+  }
+  if (!file.name.toLowerCase().endsWith(".json")) {
+    alert(t("upload.invalidJson"));
+    return;
+  }
+
+  els.importButton.disabled = true;
+  els.uploadImportButton.disabled = true;
+  els.uploadImportButton.textContent = t("actions.importing");
+  try {
+    const content = await file.text();
+    const body = await api("/api/import/upload", {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: file.name,
+        content,
+        downloadImages: true,
+      }),
+    });
+    state.importTask = body.task;
+    render();
+    startImportTaskPolling(body.task.id);
+  } catch (error) {
+    els.importButton.disabled = false;
+    els.uploadImportButton.disabled = false;
+    els.uploadImportButton.textContent = t("actions.importUpload");
+    throw error;
+  }
+}
+
 async function runProductCheck() {
   if (!state.selectedBatchId) return;
   els.runProductCheckButton.disabled = true;
@@ -1676,7 +1923,7 @@ function jumpToNextUnreviewed() {
   const next = visible
     .slice(Math.max(currentIndex + 1, 0))
     .concat(visible.slice(0, Math.max(currentIndex + 1, 0)))
-    .find((item) => !isReviewed(item));
+    .find((item) => !isExcluded(item) && !isReviewed(item));
   if (next) {
     state.selectedItemId = next.id;
     render();
@@ -1713,8 +1960,19 @@ els.resourceSelect.addEventListener("change", () => {
   state.selectedResourceFile = els.resourceSelect.value;
 });
 
+els.uploadJsonInput.addEventListener("change", () => {
+  state.selectedUploadFile = els.uploadJsonInput.files?.[0] || null;
+  renderUploadImport();
+});
+
 els.importButton.addEventListener("click", () => {
   importBatch().catch((error) => {
+    alert(error.message);
+  });
+});
+
+els.uploadImportButton.addEventListener("click", () => {
+  importUploadedBatch().catch((error) => {
     alert(error.message);
   });
 });
@@ -1733,7 +1991,10 @@ els.modelFilter.addEventListener("change", () => {
 
 els.statusFilter.addEventListener("change", () => {
   state.filters.status = els.statusFilter.value;
-  state.selectedItemId = filteredItems()[0]?.id || "";
+  const visible = filteredItems();
+  if (!visible.some((item) => item.id === state.selectedItemId)) {
+    state.selectedItemId = visible[0]?.id || "";
+  }
   render();
 });
 

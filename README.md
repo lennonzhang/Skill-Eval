@@ -4,7 +4,7 @@ Skill Eval is a local-first review tool for evaluating image-generation results 
 
 ## Current Features
 
-- Import task result JSON files from `resource/`.
+- Import task result JSON files from `resource/` or a browser-selected local JSON upload.
 - Extract model, original prompt, source image URL, optimized prompt, and result image URL.
 - Cache remote images under the local project folder at `data/cache/`.
 - Store batches, items, and evaluations in SQLite at `data/app.sqlite`.
@@ -13,6 +13,7 @@ Skill Eval is a local-first review tool for evaluating image-generation results 
   - Batch selection.
   - Model and review-status filters.
   - Source/result image comparison.
+  - Soft Exclude/Restore for items that should stay visible but leave active statistics.
   - Original and optimized prompt display.
   - Weighted score controls.
   - Issue tags and reviewer comments.
@@ -50,6 +51,7 @@ pnpm run product-check -- --model gemini --batch latest --visualize
 Command details:
 
 - `pnpm run import:resource -- --file=<name.json>`: import one JSON from `resource/` as one batch and cache images unless `--no-images` is passed.
+- Review UI local upload: choose a local `.json` with the same format as `resource/*.json`, then click Import Upload. The uploaded JSON is parsed into one batch but is not copied into `resource/`.
 - `pnpm run dev`: start the local review server.
 - `pnpm run check`: syntax-check server, scripts, database/importer code, frontend JS, and Python product-check scripts.
 - `pnpm run clear:evaluations -- --yes`: delete all local evaluation records. This is a local reset command and requires the explicit `--yes` guard.
@@ -59,6 +61,23 @@ Command details:
 - `pnpm run product-check -- ...`: run advisory product-preservation checks against cached images.
 
 Do not run `pnpm import`. That is a pnpm built-in command, not this project's data-import script.
+
+## Exclude / Restore
+
+Use Exclude when a row should remain traceable but should not affect review progress, model averages, tag counts, cache progress, or default Product Check runs. This is a soft state on the item, not a delete. The review queue still shows excluded rows, greyed out and sorted after active rows, so they can be inspected and restored later.
+
+Supported exclude reasons are:
+
+```text
+bad_input
+duplicate
+wrong_task
+missing_image
+not_evaluable
+other
+```
+
+Storage stays in the SQLite source of truth in `src/db.js`: `items.excluded_at`, `items.exclude_reason`, and `items.exclude_note`. Existing evaluations are preserved when an item is excluded, but excluded items are omitted from active stats and `Next Unreviewed`. The Product Check CLI also omits excluded items by default; use `--include-excluded` only for explicit debugging.
 
 ## Image Cache Proxy
 
@@ -88,7 +107,7 @@ Notes:
 
 The review UI shows compact progress cards for long-running local work:
 
-- Import: started by Import Resource, runs in the local server, and reports parsed, inserted, duplicate, source-cache, result-cache, and cache-failure counts.
+- Import: started by Import Resource or Import Upload, runs in the local server, and reports parsed, inserted, duplicate, source-cache, result-cache, and cache-failure counts.
 - Browser Cache: started by the page when a batch has failed source/result images. The browser fetches the remote image, then uploads the blob back to the local server. The local server writes `data/cache/` and updates SQLite.
 - Product Check: started by Run Product Check, runs as a Python child process, and reports checked, unsupported, failed, current item, and summary counts.
 
@@ -105,9 +124,12 @@ Running task snapshots are throttled to reduce local disk churn on large batches
 
 ## Batch Import
 
-One JSON file is one batch. The review UI lists `resource/*.json`; choose one file and click Import Resource. The API only accepts a JSON basename from `resource/`, not a directory, subpath, or absolute path.
+One JSON file is one batch. There are two input sources with the same JSON data contract:
 
-Each imported batch records the source file in SQLite as `batches.source_file`. The import also writes a local summary:
+- `resource/*.json`: choose one file and click Import Resource. The API only accepts a JSON basename from `resource/`, not a directory, subpath, or absolute path.
+- Local upload: choose one `.json` file from the browser and click Import Upload. The browser sends the file content to the local server for one-time ingestion. The uploaded JSON is not copied into `resource/`.
+
+Each imported batch records the source file in SQLite as `batches.source_file`. `batches.source_dir` is `resource` for project-local resource imports and `upload` for browser-selected uploads. The import also writes a local summary:
 
 ```text
 data/import-runs/<batchId>.json
@@ -160,6 +182,7 @@ pnpm run product-check -- --model gemini --batch latest
 pnpm run product-check -- --model gemini --batch latest --visualize
 pnpm run product-check -- --item <item-id>
 pnpm run product-check -- --all
+pnpm run product-check -- --batch latest --include-excluded
 ```
 
 Useful options:
@@ -174,6 +197,7 @@ Useful options:
 | `--visualize` | Write mask, material, hole, match-box, and diff heatmap overlays. |
 | `--output-dir <path>` | Override the default local output root. |
 | `--workers <n>` | Run item checks concurrently. Use `1` for serial execution. |
+| `--include-excluded` | Include soft-excluded items. By default Product Check skips them. |
 
 The review server passes `PRODUCT_CHECK_WORKERS` to Product Check and defaults to `4`. CLI runs default to `min(4, os.cpu_count())`. Results are written in the original item order even when worker completion order differs.
 
@@ -232,6 +256,15 @@ After starting the server, open:
 ```text
 http://127.0.0.1:4173
 ```
+
+By default the dev server binds to `127.0.0.1`, so it is only reachable on the same machine. To allow another device on the same LAN to open it through this machine's IP address, bind to all interfaces:
+
+```powershell
+$env:HOST = "0.0.0.0"
+pnpm run dev
+```
+
+Then open `http://<this-machine-ip>:4173` from the other device. If that still cannot connect, allow Node.js or TCP port `4173` through Windows Firewall for the current network profile.
 
 To use a different port:
 

@@ -26,6 +26,16 @@ async function postJson(path, body) {
   return { response, payload };
 }
 
+async function patchJson(path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
 async function waitForTask(taskId, expectedStatus) {
   const deadline = Date.now() + 8000;
   let latest = null;
@@ -51,7 +61,7 @@ if (missingTask.status !== 404) {
   throw new Error(`Missing task returned HTTP ${missingTask.status}, expected 404`);
 }
 
-const { batches } = await getJson("/api/batches");
+let { batches } = await getJson("/api/batches");
 if (!Array.isArray(batches)) {
   throw new Error("Batches API did not return an array");
 }
@@ -88,6 +98,64 @@ if (!failedImportTask.error?.includes("Resource file not found")) {
   throw new Error("Missing JSON import task did not record the expected failure");
 }
 
+const badUploadName = await postJson("/api/import/upload", {
+  fileName: "not-json.txt",
+  content: "[]",
+  downloadImages: false,
+});
+if (badUploadName.response.status !== 400) {
+  throw new Error(`Upload import with a non-JSON file returned HTTP ${badUploadName.response.status}, expected 400`);
+}
+
+const malformedUpload = await postJson("/api/import/upload", {
+  fileName: "smoke-upload.json",
+  content: "{not-json",
+  downloadImages: false,
+});
+if (malformedUpload.response.status !== 202 || !malformedUpload.payload.task?.id) {
+  throw new Error(`Malformed upload import returned HTTP ${malformedUpload.response.status}, expected 202 task`);
+}
+const malformedUploadTask = await waitForTask(malformedUpload.payload.task.id, "failed");
+if (!malformedUploadTask.error?.includes("not valid JSON")) {
+  throw new Error("Malformed upload task did not record the expected JSON failure");
+}
+
+const uploadFileName = `smoke-upload-${Date.now()}.json`;
+const validUpload = await postJson("/api/import/upload", {
+  fileName: uploadFileName,
+  content: JSON.stringify([
+    {
+      model: "smoke-upload-model",
+      text: "smoke upload source prompt",
+      url: "https://example.test/smoke-upload-source.png",
+      optimizationPrompt: "smoke upload optimized prompt",
+      resultUrl: "https://example.test/smoke-upload-result.png",
+    },
+  ]),
+  downloadImages: false,
+});
+if (validUpload.response.status !== 202 || !validUpload.payload.task?.id) {
+  throw new Error(`Valid upload import returned HTTP ${validUpload.response.status}, expected 202 task`);
+}
+const uploadedTask = await waitForTask(validUpload.payload.task.id, "succeeded");
+if (!uploadedTask.batchId) {
+  throw new Error("Valid upload task did not return a batch id");
+}
+const uploadedItemsBody = await getJson(`/api/batches/${uploadedTask.batchId}/items`);
+if (uploadedItemsBody.items.length !== 1 || uploadedItemsBody.items[0].raw_json_file !== uploadFileName) {
+  throw new Error("Uploaded batch items did not match the uploaded JSON");
+}
+const uploadedBatchBody = await getJson("/api/batches");
+const uploadedBatch = uploadedBatchBody.batches.find((candidate) => candidate.id === uploadedTask.batchId);
+if (uploadedBatch?.source_dir !== "upload" || uploadedBatch?.source_file !== uploadFileName) {
+  throw new Error("Uploaded batch did not record upload source metadata");
+}
+batches = uploadedBatchBody.batches;
+const resourcesAfterUpload = await getJson("/api/resources");
+if (resourcesAfterUpload.resources.some((resource) => resource.file === uploadFileName)) {
+  throw new Error("Uploaded JSON was unexpectedly listed as a resource file");
+}
+
 if (batches.length === 0) {
   const missingItem = await postJson("/api/items/not-a-real-item/evaluation", {
     product_preservation_score: 5,
@@ -119,22 +187,27 @@ if (batches.length === 0) {
   process.exit(0);
 }
 
-const batch = batches[0];
+const batch = batches.find((candidate) => candidate.id === uploadedTask.batchId) || batches[0];
 const { items } = await getJson(`/api/batches/${batch.id}/items`);
 if (!Array.isArray(items) || items.length === 0) {
   throw new Error(`Batch ${batch.id} has no items`);
 }
 
 const { stats } = await getJson(`/api/batches/${batch.id}/stats`);
-if (!stats?.summary || stats.summary.total_items !== items.length) {
+const activeItems = items.filter((item) => !item.is_excluded);
+const excludedItems = items.filter((item) => item.is_excluded);
+if (!stats?.summary || stats.summary.total_items !== activeItems.length) {
   throw new Error("Stats summary does not match item count");
+}
+if ((stats.summary.excluded_items || 0) !== excludedItems.length) {
+  throw new Error("Stats summary does not match excluded item count");
 }
 
 const recomputeCounts = await postJson(`/api/batches/${batch.id}/cache-counts/recompute`, {});
 if (recomputeCounts.response.status !== 200 || recomputeCounts.payload.batchId !== batch.id) {
   throw new Error(`Cache-count recompute returned HTTP ${recomputeCounts.response.status}, expected 200`);
 }
-if (recomputeCounts.payload.stats?.summary?.total_items !== items.length) {
+if (recomputeCounts.payload.stats?.summary?.total_items !== activeItems.length) {
   throw new Error("Cache-count recompute stats did not match item count");
 }
 
@@ -168,6 +241,58 @@ const invalidEvaluation = await postJson(`/api/items/${items[0].id}/evaluation`,
 });
 if (invalidEvaluation.response.status !== 400) {
   throw new Error(`Invalid evaluation returned HTTP ${invalidEvaluation.response.status}, expected 400`);
+}
+
+if (activeItems.length > 0) {
+  const exclusionTarget = activeItems[0];
+  const statsBeforeExclusion = await getJson(`/api/batches/${batch.id}/stats`);
+  let exclusionApplied = false;
+  try {
+    const badExclusion = await patchJson(`/api/items/${exclusionTarget.id}/exclusion`, {
+      excluded: true,
+      reason: "not-a-real-reason",
+      note: "",
+    });
+    if (badExclusion.response.status !== 400) {
+      throw new Error(`Invalid exclusion returned HTTP ${badExclusion.response.status}, expected 400`);
+    }
+
+    const excludeResponse = await patchJson(`/api/items/${exclusionTarget.id}/exclusion`, {
+      excluded: true,
+      reason: "not_evaluable",
+      note: "smoke temporary exclusion",
+    });
+    if (excludeResponse.response.status !== 200 || !excludeResponse.payload.item?.is_excluded) {
+      throw new Error(`Exclude endpoint returned HTTP ${excludeResponse.response.status}, expected excluded item`);
+    }
+    exclusionApplied = true;
+
+    const excludedList = await getJson(`/api/batches/${batch.id}/items`);
+    const excludedItem = excludedList.items.find((item) => item.id === exclusionTarget.id);
+    if (!excludedItem?.is_excluded) {
+      throw new Error("Excluded item remained missing or active in items API");
+    }
+    const firstExcludedIndex = excludedList.items.findIndex((item) => item.is_excluded);
+    const laterActiveIndex = excludedList.items.findIndex((item, index) => index > firstExcludedIndex && !item.is_excluded);
+    if (firstExcludedIndex !== -1 && laterActiveIndex !== -1) {
+      throw new Error("Excluded item was not sorted after active items");
+    }
+
+    const statsAfterExclusion = await getJson(`/api/batches/${batch.id}/stats`);
+    if (statsAfterExclusion.stats.summary.total_items !== statsBeforeExclusion.stats.summary.total_items - 1) {
+      throw new Error("Stats total_items did not exclude the temporary item");
+    }
+    if (statsAfterExclusion.stats.summary.excluded_items !== statsBeforeExclusion.stats.summary.excluded_items + 1) {
+      throw new Error("Stats excluded_items did not include the temporary item");
+    }
+  } finally {
+    if (exclusionApplied) {
+      const restoreResponse = await patchJson(`/api/items/${exclusionTarget.id}/exclusion`, { excluded: false });
+      if (restoreResponse.response.status !== 200 || restoreResponse.payload.item?.is_excluded) {
+        throw new Error(`Restore endpoint returned HTTP ${restoreResponse.response.status}, expected active item`);
+      }
+    }
+  }
 }
 
 const missingItem = await postJson("/api/items/not-a-real-item/evaluation", {

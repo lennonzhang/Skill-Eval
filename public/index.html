@@ -22,8 +22,18 @@
             </select>
           </label>
           <select id="batchSelect" aria-label="Batch" data-i18n-aria-label="app.batch"></select>
-          <select id="resourceSelect" aria-label="Resource JSON"></select>
-          <button id="importButton" type="button" data-i18n="actions.importResource">Import Resource</button>
+          <div class="import-controls">
+            <div class="resource-import">
+              <select id="resourceSelect" aria-label="Resource JSON"></select>
+              <button id="importButton" type="button" data-i18n="actions.importResource">Import Resource</button>
+            </div>
+            <div class="upload-import">
+              <input id="uploadJsonInput" type="file" accept="application/json,.json" />
+              <label class="upload-json-button" for="uploadJsonInput" data-i18n="actions.chooseJson">Choose JSON</label>
+              <span id="uploadJsonMeta" data-i18n="upload.none">No file selected</span>
+              <button id="uploadImportButton" class="secondary" type="button" data-i18n="actions.importUpload">Import Upload</button>
+            </div>
+          </div>
           <button id="runProductCheckButton" type="button">Run Product Check</button>
         </div>
       </header>
@@ -61,9 +71,11 @@
         <label>
           <span data-i18n="filters.status">Status</span>
           <select id="statusFilter">
-            <option value="all" data-i18n="filters.all">All</option>
+            <option value="all" data-i18n="filters.allIncludingExcluded">All incl. excluded</option>
+            <option value="active" data-i18n="filters.active">All active</option>
             <option value="unreviewed" data-i18n="filters.unreviewed">Unreviewed</option>
             <option value="reviewed" data-i18n="filters.reviewed">Reviewed</option>
+            <option value="excluded" data-i18n="filters.excluded">Excluded</option>
           </select>
         </label>
         <label>

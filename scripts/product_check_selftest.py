@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import sqlite3
@@ -11,7 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from product_check import ROOT_DIR, analyze_pair, analyze_rows, write_visualizations
+from product_check import ROOT_DIR, analyze_pair, analyze_rows, fetch_rows, write_visualizations
 
 
 SELFTEST_DIR = ROOT_DIR / "data" / "product-checks" / "selftest"
@@ -176,6 +177,64 @@ def run_case(name: str, source: np.ndarray, result: np.ndarray, validate) -> dic
         "maskQuality": analysis.get("maskQuality", {}),
         "metrics": analysis.get("metrics", {}),
     }
+
+
+def run_exclusion_fetch_selftest(database_path: Path) -> None:
+    if database_path.exists():
+        database_path.unlink()
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE batches (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              imported_at TEXT NOT NULL
+            );
+            CREATE TABLE items (
+              id TEXT PRIMARY KEY,
+              batch_id TEXT NOT NULL,
+              model TEXT NOT NULL,
+              raw_json_file TEXT NOT NULL,
+              raw_index INTEGER NOT NULL,
+              source_image_path TEXT,
+              result_image_path TEXT,
+              source_fetch_status TEXT,
+              result_fetch_status TEXT,
+              excluded_at TEXT
+            );
+            INSERT INTO batches (id, name, imported_at)
+            VALUES ('exclusion-fetch-batch', 'Exclusion fetch batch', '2026-05-18T00:00:00.000Z');
+            INSERT INTO items (
+              id, batch_id, model, raw_json_file, raw_index, source_fetch_status, result_fetch_status, excluded_at
+            )
+            VALUES
+              ('active-product-check-item', 'exclusion-fetch-batch', 'selftest-model', 'selftest.json', 0, 'failed', 'failed', NULL),
+              ('excluded-product-check-item', 'exclusion-fetch-batch', 'selftest-model', 'selftest.json', 1, 'failed', 'failed', '2026-05-18T00:00:00.000Z');
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    base_args = {
+        "database": str(database_path),
+        "batch": "exclusion-fetch-batch",
+        "model": None,
+        "item": [],
+        "all": False,
+        "limit": None,
+        "include_excluded": False,
+    }
+    rows, filters = fetch_rows(argparse.Namespace(**base_args))
+    assert_true(filters["supportsExclusions"] is True, "fetch_rows should detect exclusion columns")
+    assert_true([row["id"] for row in rows] == ["active-product-check-item"], "default fetch should skip excluded rows")
+
+    rows, _ = fetch_rows(argparse.Namespace(**{**base_args, "include_excluded": True}))
+    assert_true(
+        [row["id"] for row in rows] == ["active-product-check-item", "excluded-product-check-item"],
+        "include_excluded fetch should include soft-excluded rows",
+    )
 
 
 def main() -> int:
@@ -602,12 +661,15 @@ def main() -> int:
         "parallel row order should be stable",
     )
     assert_true(len(parallel_items) == 3, "parallel product-check should return every item")
+    exclusion_database = SELFTEST_DIR / "exclusion-fetch.sqlite"
+    run_exclusion_fetch_selftest(exclusion_database)
 
     payload = {
         "ok": True,
         "cases": cases,
         "overlays": overlays,
         "parallelItems": [item["itemId"] for item in parallel_items],
+        "exclusionFetch": "passed",
     }
     (SELFTEST_DIR / "results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))

@@ -12,16 +12,20 @@ import {
   initializeDatabase,
   itemExists,
   saveEvaluation,
+  setItemExclusion,
   updateBatchCounts,
 } from "./src/db.js";
 import {
   cacheBrowserUploadedImage,
   importResourceBatch,
+  importUploadedJsonBatch,
   MAX_IMAGE_BYTES,
+  MAX_UPLOAD_JSON_BYTES,
   normalizeResourceFileName,
+  normalizeUploadedJsonFileName,
   retryItemImage,
+  listResourceJsonFiles,
 } from "./src/importer.js";
-import { listResourceJsonFiles } from "./src/importer.js";
 import { createTask, finishTask, getLatestTask, getTask, updateTask } from "./src/tasks.js";
 import { EvaluationValidationError } from "./public/scoring.js";
 
@@ -30,6 +34,7 @@ const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const productChecksDir = path.join(dataDir, "product-checks");
 const port = Number(process.env.PORT || 4173);
+const host = process.env.HOST || "127.0.0.1";
 const productCheckWorkers = Math.max(1, Math.floor(Number(process.env.PRODUCT_CHECK_WORKERS || 4)) || 4);
 const importCacheWorkers = Math.max(1, Math.floor(Number(process.env.SKILL_EVAL_CACHE_WORKERS || 4)) || 4);
 const productCheckJobs = new Map();
@@ -67,9 +72,16 @@ function sendError(res, statusCode, message, details) {
   sendJson(res, statusCode, { error: message, details });
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = 2 * 1024 * 1024) {
   const chunks = [];
+  let total = 0;
   for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const error = new Error(`Request body exceeds ${maxBytes} bytes`);
+      error.statusCode = 413;
+      throw error;
+    }
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
@@ -349,10 +361,11 @@ function updateImportTaskFromProgress(taskId, event, counters) {
   updateTask(taskId, patch);
 }
 
-function startImportTask({ body }) {
-  const sourceFile = body.file;
+function startImportTask({ body, source = "resource" }) {
+  const sourceFile = source === "upload" ? body.fileName : body.file;
   const task = createTask("import", {
     sourceFile,
+    source,
     status: "queued",
     message: `Queued import ${sourceFile}`,
     summary: {
@@ -370,16 +383,26 @@ function startImportTask({ body }) {
 
   setImmediate(async () => {
     try {
-      const result = await importResourceBatch({
+      const importOptions = {
         batchName: body.name,
         cacheWorkers: body.cacheWorkers || importCacheWorkers,
         downloadImages: body.downloadImages !== false,
-        files: sourceFile ? [sourceFile] : [],
         onProgress: (event) => {
           logEvent("import", event);
           updateImportTaskFromProgress(task.id, event, counters);
         },
-      });
+      };
+      const result =
+        source === "upload"
+          ? await importUploadedJsonBatch({
+              ...importOptions,
+              content: body.content,
+              fileName: sourceFile,
+            })
+          : await importResourceBatch({
+              ...importOptions,
+              files: sourceFile ? [sourceFile] : [],
+            });
       finishTask(task.id, "succeeded", {
         batchId: result.batch.id,
         done: result.parsed,
@@ -402,6 +425,7 @@ function startImportTask({ body }) {
         taskId: task.id,
         batchId: result.batch.id,
         sourceFile: result.batch.sourceFile,
+        sourceDir: result.batch.sourceDir,
       });
     } catch (error) {
       finishTask(task.id, "failed", {
@@ -412,6 +436,7 @@ function startImportTask({ body }) {
         event: "task-failed",
         taskId: task.id,
         sourceFile,
+        source,
         error: sanitizeError(error),
       });
     }
@@ -707,6 +732,35 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/import/upload") {
+    const body = await readBody(req, MAX_UPLOAD_JSON_BYTES + 1024 * 1024);
+    if (!body.fileName) {
+      const error = new Error("Exactly one uploaded JSON file must be selected for import");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (typeof body.content !== "string") {
+      const error = new Error("Uploaded JSON content is required");
+      error.statusCode = 400;
+      throw error;
+    }
+    body.fileName = normalizeUploadedJsonFileName(body.fileName);
+    if (Buffer.byteLength(body.content, "utf8") > MAX_UPLOAD_JSON_BYTES) {
+      const error = new Error(`Uploaded JSON exceeds ${MAX_UPLOAD_JSON_BYTES} bytes`);
+      error.statusCode = 413;
+      throw error;
+    }
+    logEvent("import", {
+      event: "upload-request",
+      sourceFile: body.fileName,
+      sourceDir: "upload",
+      downloadImages: body.downloadImages !== false,
+    });
+    const task = startImportTask({ body, source: "upload" });
+    sendJson(res, 202, { task });
+    return;
+  }
+
   const batchItemsMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/items$/);
   if (req.method === "GET" && batchItemsMatch) {
     const batchId = batchItemsMatch[1];
@@ -782,6 +836,23 @@ async function handleApi(req, res, url) {
     } catch (error) {
       if (error instanceof EvaluationValidationError) {
         sendError(res, 400, error.message, error.issues);
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+
+  const exclusionMatch = url.pathname.match(/^\/api\/items\/([^/]+)\/exclusion$/);
+  if (req.method === "PATCH" && exclusionMatch) {
+    const itemId = exclusionMatch[1];
+    try {
+      const body = await readBody(req);
+      const item = setItemExclusion(itemId, body);
+      sendJson(res, 200, { item, stats: getBatchStats(item.batch_id) });
+    } catch (error) {
+      if ([400, 404].includes(error?.statusCode)) {
+        sendError(res, error.statusCode, error.message, error.issues);
         return;
       }
       throw error;
@@ -879,6 +950,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`skill-eval running at http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  const localHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  console.log(`skill-eval running at http://${localHost}:${port}`);
+  if (host === "0.0.0.0" || host === "::") {
+    console.log(`skill-eval listening on all interfaces; use http://<this-machine-ip>:${port} from the LAN`);
+  }
 });
