@@ -107,6 +107,14 @@ if (badUploadName.response.status !== 400) {
   throw new Error(`Upload import with a non-JSON file returned HTTP ${badUploadName.response.status}, expected 400`);
 }
 
+const badUploadPreflightName = await postJson("/api/import/upload/preflight", {
+  fileName: "not-json.txt",
+  content: "[]",
+});
+if (badUploadPreflightName.response.status !== 400) {
+  throw new Error(`Upload preflight with a non-JSON file returned HTTP ${badUploadPreflightName.response.status}, expected 400`);
+}
+
 const malformedUpload = await postJson("/api/import/upload", {
   fileName: "smoke-upload.json",
   content: "{not-json",
@@ -121,17 +129,42 @@ if (!malformedUploadTask.error?.includes("not valid JSON")) {
 }
 
 const uploadFileName = `smoke-upload-${Date.now()}.json`;
+const uploadContent = JSON.stringify([
+  {
+    model: "smoke-upload-model",
+    text: "smoke upload source prompt",
+    url: "https://example.test/smoke-upload-source.png",
+    optimizationPrompt: "smoke upload optimized prompt",
+    resultUrl: "https://example.test/smoke-upload-result.png",
+  },
+]);
+const validUploadPreflight = await postJson("/api/import/upload/preflight", {
+  fileName: uploadFileName,
+  content: uploadContent,
+});
+if (validUploadPreflight.response.status !== 200 || validUploadPreflight.payload.preflight?.validRecords !== 1) {
+  throw new Error(`Valid upload preflight returned HTTP ${validUploadPreflight.response.status}, expected 200 with one valid record`);
+}
+if (!validUploadPreflight.payload.preflight.sourceDigest?.startsWith("sha256:")) {
+  throw new Error("Valid upload preflight did not return a source digest");
+}
+const digestMismatchUpload = await postJson("/api/import/upload", {
+  fileName: uploadFileName,
+  content: uploadContent,
+  sourceDigest: "sha256:not-the-same",
+  downloadImages: false,
+});
+if (digestMismatchUpload.response.status !== 202 || !digestMismatchUpload.payload.task?.id) {
+  throw new Error(`Digest mismatch upload returned HTTP ${digestMismatchUpload.response.status}, expected 202 task`);
+}
+const digestMismatchTask = await waitForTask(digestMismatchUpload.payload.task.id, "failed");
+if (!digestMismatchTask.error?.includes("Source changed after preflight")) {
+  throw new Error("Digest mismatch upload task did not record the expected failure");
+}
 const validUpload = await postJson("/api/import/upload", {
   fileName: uploadFileName,
-  content: JSON.stringify([
-    {
-      model: "smoke-upload-model",
-      text: "smoke upload source prompt",
-      url: "https://example.test/smoke-upload-source.png",
-      optimizationPrompt: "smoke upload optimized prompt",
-      resultUrl: "https://example.test/smoke-upload-result.png",
-    },
-  ]),
+  content: uploadContent,
+  sourceDigest: validUploadPreflight.payload.preflight.sourceDigest,
   downloadImages: false,
 });
 if (validUpload.response.status !== 202 || !validUpload.payload.task?.id) {
@@ -154,6 +187,33 @@ batches = uploadedBatchBody.batches;
 const resourcesAfterUpload = await getJson("/api/resources");
 if (resourcesAfterUpload.resources.some((resource) => resource.file === uploadFileName)) {
   throw new Error("Uploaded JSON was unexpectedly listed as a resource file");
+}
+
+const archiveResponse = await patchJson(`/api/batches/${uploadedTask.batchId}/archive`, {
+  reason: "other",
+  note: "smoke archive restore",
+});
+if (archiveResponse.response.status !== 200 || !archiveResponse.payload.batch?.archived_at) {
+  throw new Error(`Archive endpoint returned HTTP ${archiveResponse.response.status}, expected archived batch`);
+}
+const hiddenAfterArchive = await getJson("/api/batches");
+if (hiddenAfterArchive.batches.some((candidate) => candidate.id === uploadedTask.batchId)) {
+  throw new Error("Archived batch was not hidden from the default batch list");
+}
+const visibleArchived = await getJson("/api/batches?includeArchived=1");
+if (!visibleArchived.batches.some((candidate) => candidate.id === uploadedTask.batchId && candidate.archived_at)) {
+  throw new Error("Archived batch was not visible with includeArchived=1");
+}
+const restoreResponse = await patchJson(`/api/batches/${uploadedTask.batchId}/restore`, {});
+if (restoreResponse.response.status !== 200 || restoreResponse.payload.batch?.archived_at) {
+  throw new Error(`Restore endpoint returned HTTP ${restoreResponse.response.status}, expected active batch`);
+}
+const deletePlanResponse = await postJson(`/api/batches/${uploadedTask.batchId}/delete-plan`, {});
+if (deletePlanResponse.response.status !== 200 || deletePlanResponse.payload.plan?.items !== 1) {
+  throw new Error(`Delete-plan endpoint returned HTTP ${deletePlanResponse.response.status}, expected one item`);
+}
+if (deletePlanResponse.payload.plan.artifacts?.some((artifact) => !String(artifact.path).startsWith("data"))) {
+  throw new Error("Delete-plan returned an artifact outside data/");
 }
 
 if (batches.length === 0) {
@@ -227,6 +287,9 @@ if (run !== null && run.batchId !== batch.id) {
 }
 if (run !== null && (!("status" in run) || !("done" in run) || !("total" in run) || !("summary" in run))) {
   throw new Error("Product-check run status did not include status/done/total/summary");
+}
+if (run !== null && !["versioned", "legacy"].includes(run.metadataStatus)) {
+  throw new Error("Product-check run status did not include metadataStatus");
 }
 
 const invalidEvaluation = await postJson(`/api/items/${items[0].id}/evaluation`, {

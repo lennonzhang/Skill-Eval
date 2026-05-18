@@ -1,16 +1,22 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  archiveBatch,
+  batchExists,
+  deleteBatchRecord,
+  getBatchById,
+  getBatchDeleteCounts,
   getBatchStats,
   getBatches,
   getItemsForBatch,
   initializeDatabase,
   itemExists,
+  restoreBatch,
   saveEvaluation,
   setItemExclusion,
   updateBatchCounts,
@@ -23,6 +29,8 @@ import {
   MAX_UPLOAD_JSON_BYTES,
   normalizeResourceFileName,
   normalizeUploadedJsonFileName,
+  preflightResourceJson,
+  preflightUploadedJson,
   retryItemImage,
   listResourceJsonFiles,
 } from "./src/importer.js";
@@ -151,6 +159,100 @@ function safeJoin(baseDir, requestPath) {
   return target;
 }
 
+function safeDataArtifact(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  const allowed =
+    /^cache\/[^/]+\/?$/.test(normalized) ||
+    /^import-runs\/[^/]+\.json$/.test(normalized) ||
+    /^product-checks\/[^/]+\/?$/.test(normalized);
+  if (!allowed) return null;
+  const target = safeJoin(dataDir, normalized);
+  if (!target) return null;
+  return {
+    relativePath: path.join("data", ...normalized.split("/")),
+    absolutePath: target,
+  };
+}
+
+function artifactSize(filePath) {
+  if (!existsSync(filePath)) return 0;
+  const info = statSync(filePath);
+  if (info.isFile()) return info.size;
+  if (!info.isDirectory()) return 0;
+  let total = 0;
+  const stack = [filePath];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || !existsSync(current)) continue;
+    const currentInfo = statSync(current);
+    if (currentInfo.isFile()) {
+      total += currentInfo.size;
+    } else if (currentInfo.isDirectory()) {
+      for (const name of readdirSync(current)) {
+        stack.push(path.join(current, name));
+      }
+    }
+  }
+  return total;
+}
+
+function buildBatchDeletePlan(batchId) {
+  const batch = getBatchById(batchId, { includeArchived: true });
+  if (!batch) {
+    const error = new Error("Batch not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  const counts = getBatchDeleteCounts(batchId);
+  const artifactCandidates = [
+    safeDataArtifact(`cache/${batchId}`),
+    safeDataArtifact(`import-runs/${batchId}.json`),
+    safeDataArtifact(`product-checks/${batchId}`),
+  ].filter(Boolean);
+  const artifacts = artifactCandidates.map((artifact) => ({
+    path: artifact.relativePath,
+    exists: existsSync(artifact.absolutePath),
+    bytes: artifactSize(artifact.absolutePath),
+  }));
+  return {
+    batchId,
+    batch: {
+      id: batch.id,
+      name: batch.name,
+      sourceDir: batch.source_dir,
+      sourceFile: batch.source_file,
+      archivedAt: batch.archived_at,
+    },
+    items: counts.items,
+    evaluations: counts.evaluations,
+    artifacts,
+    totalBytes: artifacts.reduce((sum, artifact) => sum + artifact.bytes, 0),
+  };
+}
+
+function deleteBatchArtifacts(batchId) {
+  const plan = buildBatchDeletePlan(batchId);
+  for (const artifact of plan.artifacts) {
+    if (!artifact.exists) continue;
+    const safe = safeDataArtifact(artifact.path.replace(/^data[\\/]/, ""));
+    if (!safe) {
+      const error = new Error(`Unsafe artifact path: ${artifact.path}`);
+      error.statusCode = 403;
+      throw error;
+    }
+    rmSync(safe.absolutePath, { recursive: true, force: true });
+  }
+  return plan;
+}
+
+function ensureNoRunningBatchTask(batchId) {
+  if (productCheckJobs.has(batchId)) {
+    const error = new Error("Batch has a running Product Check task");
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
 function normalizeProductCheckPath(productCheck) {
   if (!productCheck || typeof productCheck !== "object") return productCheck;
   if (productCheck.sourceImagePath) {
@@ -167,6 +269,17 @@ function normalizeProductCheckPath(productCheck) {
   return productCheck;
 }
 
+function productCheckMetadata(payload) {
+  const metadataStatus =
+    payload?.algorithmVersion && payload?.thresholdProfileId && payload?.thresholdProfileDigest ? "versioned" : "legacy";
+  return {
+    metadataStatus,
+    algorithmVersion: payload?.algorithmVersion || null,
+    thresholdProfileId: payload?.thresholdProfileId || null,
+    thresholdProfileDigest: payload?.thresholdProfileDigest || null,
+  };
+}
+
 async function readProductCheckBatch(batchId) {
   const filePath = safeJoin(productChecksDir, `${batchId}/results.json`);
   if (!filePath) {
@@ -181,6 +294,7 @@ async function readProductCheckBatch(batchId) {
   const items = Array.isArray(payload.items) ? payload.items.map((item) => normalizeProductCheckPath({ ...item })) : [];
   return {
     ...payload,
+    ...productCheckMetadata(payload),
     items,
   };
 }
@@ -206,6 +320,7 @@ function normalizeProductCheckStatus(batchId, status) {
   const total = toCount(status.total, toCount(status.summary?.total, done));
   return {
     ...status,
+    ...productCheckMetadata(status),
     batchId: status.batchId || batchId,
     status: status.status || "unknown",
     done,
@@ -387,6 +502,7 @@ function startImportTask({ body, source = "resource" }) {
         batchName: body.name,
         cacheWorkers: body.cacheWorkers || importCacheWorkers,
         downloadImages: body.downloadImages !== false,
+        sourceDigest: body.sourceDigest,
         onProgress: (event) => {
           logEvent("import", event);
           updateImportTaskFromProgress(task.id, event, counters);
@@ -509,6 +625,9 @@ function updateProductCheckStatusFromEvent(batchId, payload) {
     next.latestMessage = `Selected ${next.total} item(s)`;
     next.outputDir = payload.outputDir || next.outputDir || null;
     next.workers = payload.workers || next.workers || null;
+    next.algorithmVersion = payload.algorithmVersion || next.algorithmVersion || null;
+    next.thresholdProfileId = payload.thresholdProfileId || next.thresholdProfileId || null;
+    next.thresholdProfileDigest = payload.thresholdProfileDigest || next.thresholdProfileDigest || null;
     next.summary = productCheckSummaryFromStatus(next);
   } else if (payload.event === "product-check:item") {
     const isChecked = payload.status === "checked";
@@ -533,6 +652,9 @@ function updateProductCheckStatusFromEvent(batchId, payload) {
     next.summary = payload.summary || current.summary || productCheckSummaryFromStatus(next);
     next.latestMessage = "Product Check finished";
     next.output = payload.output || next.output || null;
+    next.algorithmVersion = payload.algorithmVersion || next.algorithmVersion || null;
+    next.thresholdProfileId = payload.thresholdProfileId || next.thresholdProfileId || null;
+    next.thresholdProfileDigest = payload.thresholdProfileDigest || next.thresholdProfileDigest || null;
   } else {
     return;
   }
@@ -687,7 +809,7 @@ async function startProductCheckRun(batchId) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/batches") {
-    sendJson(res, 200, { batches: getBatches() });
+    sendJson(res, 200, { batches: getBatches({ includeArchived: url.searchParams.get("includeArchived") === "1" }) });
     return;
   }
 
@@ -711,6 +833,33 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/resources") {
     sendJson(res, 200, { resources: await listResourceJsonFiles() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/import/preflight") {
+    const body = await readBody(req);
+    if (!body.file) {
+      const error = new Error("Exactly one resource JSON file must be selected for preflight");
+      error.statusCode = 400;
+      throw error;
+    }
+    sendJson(res, 200, { preflight: await preflightResourceJson({ file: body.file }) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/import/upload/preflight") {
+    const body = await readBody(req, MAX_UPLOAD_JSON_BYTES + 1024 * 1024);
+    if (!body.fileName) {
+      const error = new Error("Exactly one uploaded JSON file must be selected for preflight");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (typeof body.content !== "string") {
+      const error = new Error("Uploaded JSON content is required");
+      error.statusCode = 400;
+      throw error;
+    }
+    sendJson(res, 200, { preflight: preflightUploadedJson({ fileName: body.fileName, content: body.content }) });
     return;
   }
 
@@ -793,7 +942,7 @@ async function handleApi(req, res, url) {
   const productCheckRunMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/product-check\/runs$/);
   if (req.method === "POST" && productCheckRunMatch) {
     const batchId = productCheckRunMatch[1];
-    if (!getBatches().some((batch) => batch.id === batchId)) {
+    if (!batchExists(batchId, { includeArchived: true })) {
       sendError(res, 404, "Batch not found");
       return;
     }
@@ -812,12 +961,51 @@ async function handleApi(req, res, url) {
   const cacheCountsMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/cache-counts\/recompute$/);
   if (req.method === "POST" && cacheCountsMatch) {
     const batchId = cacheCountsMatch[1];
-    if (!getBatches().some((batch) => batch.id === batchId)) {
+    if (!batchExists(batchId, { includeArchived: true })) {
       sendError(res, 404, "Batch not found");
       return;
     }
     updateBatchCounts(batchId);
     sendJson(res, 200, { batchId, stats: getBatchStats(batchId) });
+    return;
+  }
+
+  const archiveMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/archive$/);
+  if (req.method === "PATCH" && archiveMatch) {
+    const batchId = archiveMatch[1];
+    ensureNoRunningBatchTask(batchId);
+    const body = await readBody(req);
+    sendJson(res, 200, { batch: archiveBatch(batchId, body), batches: getBatches({ includeArchived: true }) });
+    return;
+  }
+
+  const restoreMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/restore$/);
+  if (req.method === "PATCH" && restoreMatch) {
+    const batchId = restoreMatch[1];
+    sendJson(res, 200, { batch: restoreBatch(batchId), batches: getBatches({ includeArchived: true }) });
+    return;
+  }
+
+  const deletePlanMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/delete-plan$/);
+  if (req.method === "POST" && deletePlanMatch) {
+    const batchId = deletePlanMatch[1];
+    ensureNoRunningBatchTask(batchId);
+    sendJson(res, 200, { plan: buildBatchDeletePlan(batchId) });
+    return;
+  }
+
+  const deleteBatchMatch = url.pathname.match(/^\/api\/batches\/([^/]+)$/);
+  if (req.method === "DELETE" && deleteBatchMatch) {
+    const batchId = deleteBatchMatch[1];
+    ensureNoRunningBatchTask(batchId);
+    const body = await readBody(req);
+    if (body.confirmBatchId !== batchId) {
+      sendError(res, 400, "Batch delete requires confirmBatchId to match the batch id");
+      return;
+    }
+    const plan = deleteBatchArtifacts(batchId);
+    deleteBatchRecord(batchId);
+    sendJson(res, 200, { deleted: true, plan });
     return;
   }
 
@@ -942,7 +1130,7 @@ const server = http.createServer(async (req, res) => {
     res.end(indexHtml);
   } catch (error) {
     console.error(error);
-    if (error?.statusCode === 400 || error?.statusCode === 404 || error?.statusCode === 409) {
+    if ([400, 403, 404, 409, 413].includes(error?.statusCode)) {
       sendError(res, error.statusCode, error.message);
       return;
     }

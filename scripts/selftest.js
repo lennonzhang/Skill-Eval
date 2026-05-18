@@ -5,13 +5,19 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { importResourceBatch, importUploadedJsonBatch } from "../src/importer.js";
+import { importResourceBatch, importUploadedJsonBatch, preflightUploadedJson } from "../src/importer.js";
 import {
+  archiveBatch,
   createBatch,
+  deleteBatchRecord,
+  getBatchById,
+  getBatchDeleteCounts,
   getBatchStats,
+  getBatches,
   getDatabase,
   getItemsForBatch,
   insertItem,
+  restoreBatch,
   saveEvaluation,
   setItemExclusion,
   updateBatchCounts,
@@ -112,6 +118,16 @@ try {
   });
   const testBatch = db.prepare("SELECT source_file FROM batches WHERE id = ?").get(testBatchId);
   assert.equal(testBatch.source_file, "selftest.json");
+  const defaultBatchIds = getBatches().map((batch) => batch.id);
+  assert.ok(defaultBatchIds.includes(testBatchId));
+  const archivedBatch = archiveBatch(testBatchId, { reason: "other", note: "selftest archive" });
+  assert.equal(archivedBatch.archive_reason, "other");
+  assert.ok(archivedBatch.archived_at);
+  assert.equal(getBatches().some((batch) => batch.id === testBatchId), false);
+  assert.equal(getBatches({ includeArchived: true }).some((batch) => batch.id === testBatchId), true);
+  const restoredBatch = restoreBatch(testBatchId);
+  assert.equal(restoredBatch.archived_at, null);
+  assert.ok(getBatches().some((batch) => batch.id === testBatchId));
   insertItem({
     id: testItemId,
     batchId: testBatchId,
@@ -177,6 +193,7 @@ try {
 
   testStats = getBatchStats(testBatchId).summary;
   assert.equal(testStats.reviewed_items, 1);
+  assert.deepEqual(getBatchDeleteCounts(testBatchId), { items: 2, evaluations: 1 });
 
   updateSingleImageCacheStatus(testItemId, "source", {
     imagePath: "data/cache/selftest/source.png",
@@ -335,6 +352,56 @@ assert.throws(
 const afterRollback = getBatchStats(testBatchId).summary;
 assert.equal(afterRollback.total_items, 0);
 assert.equal(afterRollback.reviewed_items, 0);
+assert.equal(getBatchById(testBatchId, { includeArchived: true }), null);
+
+db.exec("BEGIN");
+try {
+  const deleteBatchId = `selftest-delete-batch-${randomUUID()}`;
+  const deleteItemId = `selftest-delete-item-${randomUUID()}`;
+  createBatch({
+    id: deleteBatchId,
+    name: "Selftest delete batch",
+    sourceDir: "selftest",
+    sourceFile: "selftest-delete.json",
+    importedAt: now,
+  });
+  insertItem({
+    id: deleteItemId,
+    batchId: deleteBatchId,
+    rawJsonFile: "selftest-delete.json",
+    rawIndex: 0,
+    model: "selftest-model",
+    text: "delete source prompt",
+    url: "https://example.test/delete-source.png",
+    resultUrl: "https://example.test/delete-result.png",
+    optimizationPrompt: "delete optimized prompt",
+    sourceImagePath: null,
+    resultImagePath: null,
+    sourceFetchStatus: "skipped",
+    resultFetchStatus: "skipped",
+    sourceFetchError: null,
+    resultFetchError: null,
+    importKey: randomUUID(),
+    createdAt: now,
+  });
+  saveEvaluation(deleteItemId, {
+    product_preservation_score: 5,
+    instruction_adherence_score: 5,
+    integration_grounding_score: 5,
+    prompt_optimization_value_score: 5,
+    commercial_quality_score: 5,
+    technical_safety_score: 5,
+    status: "reviewed",
+    tags: ["excellent"],
+    comment: "delete selftest",
+  });
+  assert.deepEqual(getBatchDeleteCounts(deleteBatchId), { items: 1, evaluations: 1 });
+  deleteBatchRecord(deleteBatchId);
+  assert.equal(getBatchById(deleteBatchId, { includeArchived: true }), null);
+  assert.equal(getItemsForBatch(deleteBatchId).length, 0);
+} finally {
+  db.exec("ROLLBACK");
+}
 
 await runFetchProxySelftest();
 
@@ -385,21 +452,34 @@ try {
 
 db.exec("BEGIN");
 try {
+  const uploadContent = JSON.stringify([
+    {
+      provider: "selftest-upload-model",
+      params: {
+        content: [
+          { text: "selftest uploaded prompt" },
+          { url: "https://example.test/upload-source.png" },
+        ],
+      },
+      optimizationPrompt: "selftest uploaded optimized prompt",
+      resultUrl: "https://example.test/upload-result.png",
+    },
+  ]);
+  const uploadPreflight = preflightUploadedJson({
+    fileName: "selftest-upload.json",
+    content: uploadContent,
+  });
+  assert.equal(uploadPreflight.source, "upload");
+  assert.equal(uploadPreflight.sourceFile, "selftest-upload.json");
+  assert.equal(uploadPreflight.totalRecords, 1);
+  assert.equal(uploadPreflight.validRecords, 1);
+  assert.equal(uploadPreflight.invalidRecords, 0);
+  assert.ok(uploadPreflight.sourceDigest.startsWith("sha256:"));
+
   const uploadResult = await importUploadedJsonBatch({
     fileName: "selftest-upload.json",
-    content: JSON.stringify([
-      {
-        provider: "selftest-upload-model",
-        params: {
-          content: [
-            { text: "selftest uploaded prompt" },
-            { url: "https://example.test/upload-source.png" },
-          ],
-        },
-        optimizationPrompt: "selftest uploaded optimized prompt",
-        resultUrl: "https://example.test/upload-result.png",
-      },
-    ]),
+    content: uploadContent,
+    sourceDigest: uploadPreflight.sourceDigest,
     downloadImages: false,
   });
   assert.equal(uploadResult.batch.sourceDir, "upload");
@@ -446,6 +526,16 @@ try {
         downloadImages: false,
       }),
     /not valid JSON/
+  );
+  await assert.rejects(
+    () =>
+      importUploadedJsonBatch({
+        fileName: "selftest-upload.json",
+        content: uploadContent,
+        sourceDigest: "sha256:not-the-same",
+        downloadImages: false,
+      }),
+    /Source changed after preflight/
   );
 } finally {
   db.exec("ROLLBACK");

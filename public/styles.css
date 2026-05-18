@@ -79,6 +79,20 @@ button.secondary:hover {
   color: white;
 }
 
+button.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: white;
+}
+
+button:disabled,
+button.secondary:disabled,
+button.danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+}
+
 .shell {
   width: 100%;
   min-height: 100vh;
@@ -113,6 +127,34 @@ button.secondary:hover {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.batch-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.batch-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.archive-toggle {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.archive-toggle input {
+  width: 14px;
+  height: 14px;
 }
 
 .import-controls {
@@ -174,6 +216,56 @@ button.secondary:hover {
   min-height: 32px;
   padding: 0 10px;
   font-size: 12px;
+}
+
+.preflight-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.94);
+}
+
+.preflight-panel:empty,
+.preflight-panel[hidden] {
+  display: none;
+}
+
+.preflight-head,
+.preflight-metrics,
+.preflight-errors {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.preflight-head strong {
+  font-size: 13px;
+}
+
+.preflight-head span,
+.preflight-errors {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preflight-metrics span {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.preflight-panel.failed {
+  border-color: rgba(163, 58, 54, 0.45);
+}
+
+.preflight-panel.ready {
+  border-color: rgba(35, 112, 67, 0.35);
 }
 
 .task-progress-strip {

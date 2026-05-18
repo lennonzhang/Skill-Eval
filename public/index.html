@@ -22,6 +22,15 @@
             </select>
           </label>
           <select id="batchSelect" aria-label="Batch" data-i18n-aria-label="app.batch"></select>
+          <label class="archive-toggle">
+            <input id="showArchivedBatches" type="checkbox" />
+            <span data-i18n="batch.showArchived">Archived</span>
+          </label>
+          <div class="batch-actions">
+            <button id="archiveBatchButton" class="secondary" type="button" data-i18n="batch.archive">Archive</button>
+            <button id="restoreBatchButton" class="secondary" type="button" data-i18n="batch.restore">Restore</button>
+            <button id="deleteBatchButton" class="danger" type="button" data-i18n="batch.delete">Delete</button>
+          </div>
           <div class="import-controls">
             <div class="resource-import">
               <select id="resourceSelect" aria-label="Resource JSON"></select>
@@ -39,6 +48,7 @@
       </header>
 
       <section id="taskProgressStrip" class="task-progress-strip" aria-live="polite"></section>
+      <section id="preflightPanel" class="preflight-panel" aria-live="polite"></section>
 
       <section class="metrics" aria-label="Batch statistics" data-i18n-aria-label="metrics.aria">
         <div class="metric">

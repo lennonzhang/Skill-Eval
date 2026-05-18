@@ -5,12 +5,14 @@ Skill Eval is a local-first review tool for evaluating image-generation results 
 ## Current Features
 
 - Import task result JSON files from `resource/` or a browser-selected local JSON upload.
+- Preflight each resource/upload JSON before import, including parse counts, model counts, duplicate count, and a source digest.
 - Extract model, original prompt, source image URL, optimized prompt, and result image URL.
 - Cache remote images under the local project folder at `data/cache/`.
 - Store batches, items, and evaluations in SQLite at `data/app.sqlite`.
 - Run a local Python product-consistency prototype against cached source/result images.
 - Provide a local review UI with:
   - Batch selection.
+  - Batch Archive/Restore/Delete for local batch lifecycle management.
   - Model and review-status filters.
   - Source/result image comparison.
   - Soft Exclude/Restore for items that should stay visible but leave active statistics.
@@ -79,6 +81,20 @@ other
 
 Storage stays in the SQLite source of truth in `src/db.js`: `items.excluded_at`, `items.exclude_reason`, and `items.exclude_note`. Existing evaluations are preserved when an item is excluded, but excluded items are omitted from active stats and `Next Unreviewed`. The Product Check CLI also omits excluded items by default; use `--include-excluded` only for explicit debugging.
 
+## Batch Lifecycle
+
+Use Archive when a batch should leave the default review list but remain recoverable. Archive only updates SQLite metadata on `batches.archived_at`, `batches.archive_reason`, and `batches.archive_note`; it does not delete items, evaluations, cached images, import summaries, Product Check outputs, `resource/`, or uploaded source files.
+
+Use Delete only for local cleanup of a batch that should be removed from the tool. Delete first builds a delete plan, then requires the exact batch id as confirmation. It removes the batch row from SQLite, lets foreign keys delete its items and evaluations, and only removes these local artifact paths:
+
+```text
+data/cache/<batchId>/
+data/import-runs/<batchId>.json
+data/product-checks/<batchId>/
+```
+
+Delete never touches `resource/`, uploaded source JSON files, other batch directories, or paths outside `data/`.
+
 ## Image Cache Proxy
 
 The importer first tries to cache each remote image through Node's normal fetch path. If that path fails and a proxy is configured, it retries through the configured HTTP proxy. This is useful when a browser can open the image URL because a browser VPN extension is active, but `pnpm run import:resource` cannot reach the same host from the terminal.
@@ -129,6 +145,8 @@ One JSON file is one batch. There are two input sources with the same JSON data 
 - `resource/*.json`: choose one file and click Import Resource. The API only accepts a JSON basename from `resource/`, not a directory, subpath, or absolute path.
 - Local upload: choose one `.json` file from the browser and click Import Upload. The browser sends the file content to the local server for one-time ingestion. The uploaded JSON is not copied into `resource/`.
 
+The review UI runs a preflight before enabling import. Preflight uses the same parser and normalizer as the real import, but it does not write SQLite, does not create a batch, does not cache images, and does not write `data/import-runs/`. It reports valid/invalid rows, model counts, duplicate records, and a `sha256:` source digest. The final import sends that digest back to the server; if the source changed after preflight, the import fails with a digest mismatch instead of importing stale assumptions.
+
 Each imported batch records the source file in SQLite as `batches.source_file`. `batches.source_dir` is `resource` for project-local resource imports and `upload` for browser-selected uploads. The import also writes a local summary:
 
 ```text
@@ -143,7 +161,17 @@ Import cache concurrency is intentionally bounded. Source/result images for inse
 
 ## Product Consistency Check
 
-Product Check v3.2 is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a pure or near-white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
+Product Check is a local, reference-based QA pass for the product-preservation dimension. It is designed for source images where the product is on a pure or near-white background and the generated result should keep that same product fixed. It does not replace human review and does not write to the `evaluations` table.
+
+Every new run records algorithm/profile metadata in `results.json` and `run-status.json`:
+
+```text
+algorithmVersion
+thresholdProfileId
+thresholdProfileDigest
+```
+
+Threshold profile definitions live in `scripts/product_check_profiles.json`; Python loads them through `scripts/product_check_profiles.py`. Older Product Check files that do not contain this metadata are still readable and are shown as legacy results.
 
 Install the Python dependencies once:
 
@@ -183,6 +211,8 @@ pnpm run product-check -- --model gemini --batch latest --visualize
 pnpm run product-check -- --item <item-id>
 pnpm run product-check -- --all
 pnpm run product-check -- --batch latest --include-excluded
+pnpm run product-check -- --list-threshold-profiles
+pnpm run product-check -- --batch latest --threshold-profile stable-2026-05-18
 ```
 
 Useful options:
@@ -198,6 +228,8 @@ Useful options:
 | `--output-dir <path>` | Override the default local output root. |
 | `--workers <n>` | Run item checks concurrently. Use `1` for serial execution. |
 | `--include-excluded` | Include soft-excluded items. By default Product Check skips them. |
+| `--threshold-profile <id>` | Record a specific threshold profile id and digest for the run. |
+| `--list-threshold-profiles` | Print known Product Check threshold profiles and exit. |
 
 The review server passes `PRODUCT_CHECK_WORKERS` to Product Check and defaults to `4`. CLI runs default to `min(4, os.cpu_count())`. Results are written in the original item order even when worker completion order differs.
 

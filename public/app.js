@@ -24,6 +24,25 @@ const translations = {
     "actions.exclude": "Exclude",
     "actions.restore": "Restore",
     "actions.cancel": "Cancel",
+    "batch.archive": "Archive",
+    "batch.restore": "Restore",
+    "batch.delete": "Delete",
+    "batch.showArchived": "Archived",
+    "batch.archived": "Archived",
+    "batch.archiveConfirm": "Archive this batch?",
+    "batch.restoreConfirm": "Restore this batch?",
+    "batch.deleteConfirm": "Type the full batch id to delete local records and artifacts:",
+    "batch.deleteMismatch": "Batch id did not match. Delete cancelled.",
+    "batch.deletePlan": "Delete plan",
+    "batch.deletePlanSummary": "{items} items | {evaluations} evaluations | {bytes} local bytes",
+    "preflight.title": "Import Preflight",
+    "preflight.running": "Checking JSON...",
+    "preflight.ready": "{valid}/{total} valid | {invalid} invalid | {models} model(s)",
+    "preflight.digest": "digest {digest}",
+    "preflight.duplicates": "{count} duplicate record(s)",
+    "preflight.errors": "{count} error(s), showing first {shown}",
+    "preflight.failed": "Preflight failed",
+    "preflight.required": "Run preflight before import.",
     "task.import": "Import",
     "task.productCheck": "Product Check",
     "task.browserCache": "Browser Cache",
@@ -111,6 +130,9 @@ const translations = {
     "productCheck.diffHeatmap": "Diff heatmap",
     "productCheck.runStatus": "Product Check",
     "productCheck.notRun": "not run",
+    "productCheck.version": "Version",
+    "productCheck.profile": "Profile",
+    "productCheck.legacy": "legacy result",
     "resources.none": "No JSON files",
     "upload.none": "No file selected",
     "upload.invalidJson": "Choose a .json file.",
@@ -196,6 +218,25 @@ const translations = {
     "actions.exclude": "排除",
     "actions.restore": "恢复",
     "actions.cancel": "取消",
+    "batch.archive": "归档",
+    "batch.restore": "恢复",
+    "batch.delete": "删除",
+    "batch.showArchived": "归档",
+    "batch.archived": "已归档",
+    "batch.archiveConfirm": "确认归档此批次？",
+    "batch.restoreConfirm": "确认恢复此批次？",
+    "batch.deleteConfirm": "输入完整 batch id 以删除本地记录和产物：",
+    "batch.deleteMismatch": "batch id 不匹配，已取消删除。",
+    "batch.deletePlan": "删除计划",
+    "batch.deletePlanSummary": "{items} 条 item | {evaluations} 条评审 | {bytes} 本地产物",
+    "preflight.title": "导入预检",
+    "preflight.running": "正在检查 JSON...",
+    "preflight.ready": "{valid}/{total} 条可导入 | {invalid} 条异常 | {models} 个模型",
+    "preflight.digest": "摘要 {digest}",
+    "preflight.duplicates": "{count} 条重复记录",
+    "preflight.errors": "{count} 条错误，显示前 {shown} 条",
+    "preflight.failed": "预检失败",
+    "preflight.required": "请先完成预检再导入。",
     "task.import": "导入",
     "task.productCheck": "产品检查",
     "task.browserCache": "浏览器缓存",
@@ -283,6 +324,9 @@ const translations = {
     "productCheck.diffHeatmap": "差异热图",
     "productCheck.runStatus": "产品检查",
     "productCheck.notRun": "未运行",
+    "productCheck.version": "版本",
+    "productCheck.profile": "Profile",
+    "productCheck.legacy": "旧结果",
     "empty.initialTitle": "选择或导入批次",
     "empty.initialBody": "使用批次菜单，或导入本地 resource JSON 开始。",
     "empty.noBatch": "未加载批次",
@@ -361,6 +405,12 @@ const state = {
   resources: [],
   selectedResourceFile: "",
   selectedUploadFile: null,
+  selectedUploadContent: "",
+  showArchivedBatches: false,
+  preflight: null,
+  preflightSource: "",
+  preflightError: "",
+  preflightPending: false,
   selectedBatchId: "",
   items: [],
   stats: null,
@@ -393,7 +443,12 @@ const els = {
   languageSelect: document.querySelector("#languageSelect"),
   batchMeta: document.querySelector("#batchMeta"),
   taskProgressStrip: document.querySelector("#taskProgressStrip"),
+  preflightPanel: document.querySelector("#preflightPanel"),
   batchSelect: document.querySelector("#batchSelect"),
+  showArchivedBatches: document.querySelector("#showArchivedBatches"),
+  archiveBatchButton: document.querySelector("#archiveBatchButton"),
+  restoreBatchButton: document.querySelector("#restoreBatchButton"),
+  deleteBatchButton: document.querySelector("#deleteBatchButton"),
   resourceSelect: document.querySelector("#resourceSelect"),
   uploadJsonInput: document.querySelector("#uploadJsonInput"),
   uploadJsonMeta: document.querySelector("#uploadJsonMeta"),
@@ -537,11 +592,13 @@ function renderBatchSelect() {
 
   els.batchSelect.innerHTML = state.batches
     .map((batch) => {
-      const label = `${batch.name} (${batch.reviewed_count || 0}/${batch.item_count || 0})`;
+      const archived = batch.archived_at ? ` [${t("batch.archived")}]` : "";
+      const label = `${batch.name}${archived} (${batch.reviewed_count || 0}/${batch.item_count || 0})`;
       return `<option value="${escapeHtml(batch.id)}">${escapeHtml(label)}</option>`;
     })
     .join("");
   els.batchSelect.value = state.selectedBatchId;
+  els.showArchivedBatches.checked = state.showArchivedBatches;
 }
 
 function renderResourceSelect() {
@@ -568,7 +625,64 @@ function formatFileSize(bytes) {
 function renderUploadImport() {
   const file = state.selectedUploadFile;
   els.uploadJsonMeta.textContent = file ? `${file.name} · ${formatFileSize(file.size)}` : t("upload.none");
-  els.uploadImportButton.disabled = !file || Boolean(state.importTask && ["queued", "running"].includes(state.importTask.status));
+  const busy = Boolean(state.importTask && ["queued", "running"].includes(state.importTask.status));
+  const uploadReady = state.preflightSource === "upload" && state.preflight?.validRecords > 0 && !state.preflightError;
+  const resourceReady = state.preflightSource === "resource" && state.preflight?.validRecords > 0 && !state.preflightError;
+  els.uploadImportButton.disabled = !file || busy || !uploadReady;
+  els.importButton.disabled = !state.selectedResourceFile || busy || !resourceReady;
+}
+
+function renderPreflight() {
+  if (!els.preflightPanel) return;
+  if (state.preflightPending) {
+    els.preflightPanel.hidden = false;
+    els.preflightPanel.className = "preflight-panel";
+    els.preflightPanel.innerHTML = `<div class="preflight-head"><strong>${escapeHtml(t("preflight.title"))}</strong><span>${escapeHtml(t("preflight.running"))}</span></div>`;
+    return;
+  }
+  if (state.preflightError) {
+    els.preflightPanel.hidden = false;
+    els.preflightPanel.className = "preflight-panel failed";
+    els.preflightPanel.innerHTML = `<div class="preflight-head"><strong>${escapeHtml(t("preflight.failed"))}</strong><span>${escapeHtml(state.preflightError)}</span></div>`;
+    return;
+  }
+  const preflight = state.preflight;
+  if (!preflight) {
+    els.preflightPanel.innerHTML = "";
+    els.preflightPanel.hidden = true;
+    return;
+  }
+  const modelCount = Object.keys(preflight.modelCounts || {}).length;
+  const shortDigest = String(preflight.sourceDigest || "").slice(0, 19);
+  const errors = preflight.errors || [];
+  const shownErrors = errors.slice(0, 20);
+  els.preflightPanel.hidden = false;
+  els.preflightPanel.className = "preflight-panel ready";
+  els.preflightPanel.innerHTML = `
+    <div class="preflight-head">
+      <strong>${escapeHtml(t("preflight.title"))}</strong>
+      <span>${escapeHtml(preflight.sourceFile)}</span>
+      <span>${escapeHtml(t("preflight.digest", { digest: shortDigest }))}</span>
+    </div>
+    <div class="preflight-metrics">
+      <span>${escapeHtml(
+        t("preflight.ready", {
+          valid: preflight.validRecords,
+          total: preflight.totalRecords,
+          invalid: preflight.invalidRecords,
+          models: modelCount,
+        })
+      )}</span>
+      ${preflight.duplicates?.withinFile ? `<span>${escapeHtml(t("preflight.duplicates", { count: preflight.duplicates.withinFile }))}</span>` : ""}
+    </div>
+    ${
+      errors.length
+        ? `<div class="preflight-errors"><span>${escapeHtml(t("preflight.errors", { count: errors.length, shown: shownErrors.length }))}</span>${shownErrors
+            .map((error) => `<span>#${Number(error.index) + 1}: ${escapeHtml(error.message)}</span>`)
+            .join("")}</div>`
+        : ""
+    }
+  `;
 }
 
 function renderMetrics() {
@@ -582,6 +696,11 @@ function renderMetrics() {
   const batch = selectedBatch();
   if (!batch) {
     els.batchMeta.textContent = t("empty.noBatch");
+    els.runProductCheckButton.disabled = true;
+    els.runProductCheckButton.textContent = t("actions.runProductCheck");
+    els.archiveBatchButton.disabled = true;
+    els.restoreBatchButton.disabled = true;
+    els.deleteBatchButton.disabled = true;
     return;
   }
   const imported = batch.imported_at ? new Date(batch.imported_at).toLocaleString() : "";
@@ -594,6 +713,10 @@ function renderMetrics() {
   els.runProductCheckButton.disabled = !state.selectedBatchId || state.productCheckRun?.status === "running";
   els.runProductCheckButton.textContent =
     state.productCheckRun?.status === "running" ? t("actions.runningProductCheck") : t("actions.runProductCheck");
+  const archived = Boolean(batch.archived_at);
+  els.archiveBatchButton.disabled = archived;
+  els.restoreBatchButton.disabled = !archived;
+  els.deleteBatchButton.disabled = state.productCheckRun?.status === "running";
 }
 
 function normalizeTaskStatus(status) {
@@ -1035,10 +1158,21 @@ function productCheckImageHtml(productCheck, key, labelKey) {
 }
 
 function renderProductCheck(item) {
+  const runMetadata = state.productCheck || state.productCheckRun || {};
+  const metadata =
+    runMetadata.metadataStatus === "legacy"
+      ? t("productCheck.legacy")
+      : [
+          runMetadata.algorithmVersion ? `${t("productCheck.version")}: ${runMetadata.algorithmVersion}` : "",
+          runMetadata.thresholdProfileId ? `${t("productCheck.profile")}: ${runMetadata.thresholdProfileId}` : "",
+        ]
+          .filter(Boolean)
+          .join(" | ");
   if (!state.productCheck) {
     return `
       <section class="product-check-panel">
         <h3>${escapeHtml(t("productCheck.title"))}</h3>
+        ${metadata ? `<p class="muted">${escapeHtml(metadata)}</p>` : ""}
         <p class="muted">${escapeHtml(t("productCheck.none"))}</p>
       </section>
     `;
@@ -1049,6 +1183,7 @@ function renderProductCheck(item) {
     return `
       <section class="product-check-panel">
         <h3>${escapeHtml(t("productCheck.title"))}</h3>
+        ${metadata ? `<p class="muted">${escapeHtml(metadata)}</p>` : ""}
         <p class="muted">${escapeHtml(t("productCheck.noItem"))}</p>
       </section>
     `;
@@ -1066,6 +1201,7 @@ function renderProductCheck(item) {
         <h3>${escapeHtml(t("productCheck.title"))}</h3>
         <div class="product-check-score">${escapeHtml(score)}</div>
       </div>
+      ${metadata ? `<p class="muted">${escapeHtml(metadata)}</p>` : ""}
       <div class="product-check-summary">
         <span>${escapeHtml(t("productCheck.status"))}: ${escapeHtml(productCheck.status)}</span>
         <span>${escapeHtml(t("productCheck.confidence"))}: ${escapeHtml(productCheck.confidence)}</span>
@@ -1688,8 +1824,11 @@ async function cacheImageFromBrowser(itemId, kind) {
 }
 
 async function loadBatches() {
-  const body = await api("/api/batches");
+  const body = await api(`/api/batches${state.showArchivedBatches ? "?includeArchived=1" : ""}`);
   state.batches = body.batches;
+  if (state.selectedBatchId && !state.batches.some((batch) => batch.id === state.selectedBatchId)) {
+    state.selectedBatchId = "";
+  }
   if (!state.selectedBatchId && state.batches.length) {
     state.selectedBatchId = state.batches[0].id;
   }
@@ -1833,6 +1972,7 @@ function render() {
   renderBatchSelect();
   renderResourceSelect();
   renderUploadImport();
+  renderPreflight();
   renderMetrics();
   renderTaskProgress();
   renderFilters();
@@ -1846,12 +1986,16 @@ async function importBatch() {
     alert("Select a resource JSON file first.");
     return;
   }
+  if (state.preflightSource !== "resource" || !state.preflight?.sourceDigest) {
+    alert(t("preflight.required"));
+    return;
+  }
   els.importButton.disabled = true;
   els.importButton.textContent = t("actions.importing");
   try {
     const body = await api("/api/import", {
       method: "POST",
-      body: JSON.stringify({ file: state.selectedResourceFile, downloadImages: true }),
+      body: JSON.stringify({ file: state.selectedResourceFile, sourceDigest: state.preflight.sourceDigest, downloadImages: true }),
     });
     state.importTask = body.task;
     render();
@@ -1873,17 +2017,22 @@ async function importUploadedBatch() {
     alert(t("upload.invalidJson"));
     return;
   }
+  if (state.preflightSource !== "upload" || !state.preflight?.sourceDigest) {
+    alert(t("preflight.required"));
+    return;
+  }
 
   els.importButton.disabled = true;
   els.uploadImportButton.disabled = true;
   els.uploadImportButton.textContent = t("actions.importing");
   try {
-    const content = await file.text();
+    const content = state.selectedUploadContent || (await file.text());
     const body = await api("/api/import/upload", {
       method: "POST",
       body: JSON.stringify({
         fileName: file.name,
         content,
+        sourceDigest: state.preflight.sourceDigest,
         downloadImages: true,
       }),
     });
@@ -1896,6 +2045,109 @@ async function importUploadedBatch() {
     els.uploadImportButton.textContent = t("actions.importUpload");
     throw error;
   }
+}
+
+async function runResourcePreflight() {
+  if (!state.selectedResourceFile) return;
+  state.preflightPending = true;
+  state.preflightError = "";
+  state.preflight = null;
+  state.preflightSource = "resource";
+  render();
+  try {
+    const body = await api("/api/import/preflight", {
+      method: "POST",
+      body: JSON.stringify({ file: state.selectedResourceFile }),
+    });
+    state.preflight = body.preflight;
+  } catch (error) {
+    state.preflightError = error.message;
+  } finally {
+    state.preflightPending = false;
+    render();
+  }
+}
+
+async function runUploadPreflight() {
+  const file = state.selectedUploadFile;
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".json")) {
+    state.preflightSource = "upload";
+    state.preflight = null;
+    state.preflightError = t("upload.invalidJson");
+    render();
+    return;
+  }
+  state.preflightPending = true;
+  state.preflightError = "";
+  state.preflight = null;
+  state.preflightSource = "upload";
+  render();
+  try {
+    state.selectedUploadContent = await file.text();
+    const body = await api("/api/import/upload/preflight", {
+      method: "POST",
+      body: JSON.stringify({ fileName: file.name, content: state.selectedUploadContent }),
+    });
+    state.preflight = body.preflight;
+  } catch (error) {
+    state.preflightError = error.message;
+  } finally {
+    state.preflightPending = false;
+    render();
+  }
+}
+
+async function archiveSelectedBatch() {
+  const batch = selectedBatch();
+  if (!batch || !confirm(t("batch.archiveConfirm"))) return;
+  await api(`/api/batches/${encodeURIComponent(batch.id)}/archive`, {
+    method: "PATCH",
+    body: JSON.stringify({ reason: "other", note: "" }),
+  });
+  await loadBatches();
+  await loadBatch(state.selectedBatchId || "");
+}
+
+async function restoreSelectedBatch() {
+  const batch = selectedBatch();
+  if (!batch || !confirm(t("batch.restoreConfirm"))) return;
+  await api(`/api/batches/${encodeURIComponent(batch.id)}/restore`, {
+    method: "PATCH",
+    body: JSON.stringify({}),
+  });
+  await loadBatches();
+  await loadBatch(batch.id);
+}
+
+async function deleteSelectedBatch() {
+  const batch = selectedBatch();
+  if (!batch) return;
+  const planBody = await api(`/api/batches/${encodeURIComponent(batch.id)}/delete-plan`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const plan = planBody.plan;
+  const typed = prompt(
+    `${t("batch.deletePlan")}\n${t("batch.deletePlanSummary", {
+      items: plan.items,
+      evaluations: plan.evaluations,
+      bytes: formatFileSize(plan.totalBytes),
+    })}\n\n${t("batch.deleteConfirm")}`,
+    ""
+  );
+  if (typed !== batch.id) {
+    if (typed !== null) alert(t("batch.deleteMismatch"));
+    return;
+  }
+  await api(`/api/batches/${encodeURIComponent(batch.id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ confirmBatchId: batch.id }),
+  });
+  state.selectedBatchId = "";
+  state.selectedItemId = "";
+  await loadBatches();
+  await loadBatch(state.batches[0]?.id || "");
 }
 
 async function runProductCheck() {
@@ -1949,6 +2201,25 @@ els.batchSelect.addEventListener("change", () => {
   loadBatch(els.batchSelect.value, "", { resetFilters: true }).catch(showFatalError);
 });
 
+els.showArchivedBatches.addEventListener("change", () => {
+  state.showArchivedBatches = els.showArchivedBatches.checked;
+  loadBatches()
+    .then(() => loadBatch(state.selectedBatchId || state.batches[0]?.id || ""))
+    .catch(showFatalError);
+});
+
+els.archiveBatchButton.addEventListener("click", () => {
+  archiveSelectedBatch().catch((error) => alert(error.message));
+});
+
+els.restoreBatchButton.addEventListener("click", () => {
+  restoreSelectedBatch().catch((error) => alert(error.message));
+});
+
+els.deleteBatchButton.addEventListener("click", () => {
+  deleteSelectedBatch().catch((error) => alert(error.message));
+});
+
 els.languageSelect.addEventListener("change", () => {
   captureReviewDraft(state.selectedItemId);
   state.language = els.languageSelect.value;
@@ -1958,11 +2229,19 @@ els.languageSelect.addEventListener("change", () => {
 
 els.resourceSelect.addEventListener("change", () => {
   state.selectedResourceFile = els.resourceSelect.value;
+  runResourcePreflight().catch((error) => {
+    state.preflightError = error.message;
+    render();
+  });
 });
 
 els.uploadJsonInput.addEventListener("change", () => {
   state.selectedUploadFile = els.uploadJsonInput.files?.[0] || null;
-  renderUploadImport();
+  state.selectedUploadContent = "";
+  runUploadPreflight().catch((error) => {
+    state.preflightError = error.message;
+    render();
+  });
 });
 
 els.importButton.addEventListener("click", () => {
@@ -2020,6 +2299,9 @@ function showFatalError(error) {
 
 await loadResources().catch(showFatalError);
 await loadBatches();
+if (state.selectedResourceFile) {
+  await runResourcePreflight().catch(showFatalError);
+}
 if (state.selectedBatchId) {
   await loadBatch(state.selectedBatchId).catch(showFatalError);
 } else {

@@ -25,6 +25,8 @@ const evaluationColumns = [
 ];
 const excludeReasons = new Set(["bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"]);
 const EXCLUDE_NOTE_MAX_LENGTH = 500;
+const batchArchiveReasons = new Set(["completed", "bad_import", "duplicate", "deprecated", "other"]);
+const BATCH_ARCHIVE_NOTE_MAX_LENGTH = 500;
 
 export function initializeDatabase() {
   if (db) return db;
@@ -36,6 +38,7 @@ export function initializeDatabase() {
   // Schema source of truth. Keep column intent here instead of a separate schema.sql:
   // batches.source_file records the exact resource JSON basename for one-JSON-one-batch imports.
   // items.raw_json_file/raw_index preserve traceability without storing external URLs in reports.
+  // batches.archived_at/archive_reason/archive_note are reversible local lifecycle metadata.
   // items.excluded_at/exclude_reason/exclude_note are soft exclusion metadata; excluded rows stay visible but leave review stats.
   // evaluations stores human review only; automated Product Check remains advisory file output.
   db.exec(`
@@ -48,6 +51,9 @@ export function initializeDatabase() {
       item_count INTEGER NOT NULL DEFAULT 0,
       cached_source_count INTEGER NOT NULL DEFAULT 0,
       cached_result_count INTEGER NOT NULL DEFAULT 0,
+      archived_at TEXT,
+      archive_reason TEXT,
+      archive_note TEXT,
       notes TEXT
     );
 
@@ -89,6 +95,15 @@ function ensureBatchSchema() {
   if (!existingColumns.includes("source_file")) {
     // Backfill-compatible migration for databases created before one JSON became one batch.
     db.exec("ALTER TABLE batches ADD COLUMN source_file TEXT");
+  }
+  if (!existingColumns.includes("archived_at")) {
+    db.exec("ALTER TABLE batches ADD COLUMN archived_at TEXT");
+  }
+  if (!existingColumns.includes("archive_reason")) {
+    db.exec("ALTER TABLE batches ADD COLUMN archive_reason TEXT");
+  }
+  if (!existingColumns.includes("archive_note")) {
+    db.exec("ALTER TABLE batches ADD COLUMN archive_note TEXT");
   }
 }
 
@@ -250,15 +265,16 @@ export function updateBatchCounts(batchId) {
     );
 }
 
-export function getBatches() {
-  return getDatabase()
-    .prepare(
-      `SELECT
+function batchSelectSql(whereClause = "") {
+  return `SELECT
         b.id,
         b.name,
         b.source_dir,
         b.source_file,
         b.imported_at,
+        b.archived_at,
+        b.archive_reason,
+        b.archive_note,
         b.notes,
         SUM(CASE WHEN i.id IS NOT NULL AND i.excluded_at IS NULL THEN 1 ELSE 0 END) AS item_count,
         SUM(CASE WHEN i.id IS NOT NULL AND i.excluded_at IS NOT NULL THEN 1 ELSE 0 END) AS excluded_count,
@@ -266,10 +282,121 @@ export function getBatches() {
        FROM batches b
        LEFT JOIN items i ON i.batch_id = b.id
        LEFT JOIN evaluations e ON e.item_id = i.id
-       GROUP BY b.id
-       ORDER BY b.imported_at DESC`
+       ${whereClause}
+       GROUP BY b.id`;
+}
+
+export function getBatches({ includeArchived = false } = {}) {
+  return getDatabase()
+    .prepare(
+      `${batchSelectSql("WHERE (? = 1 OR b.archived_at IS NULL)")}
+       ORDER BY b.archived_at IS NOT NULL ASC, b.imported_at DESC`
     )
-    .all();
+    .all(includeArchived ? 1 : 0);
+}
+
+export function getBatchById(batchId, { includeArchived = false } = {}) {
+  return (
+    getDatabase()
+      .prepare(`${batchSelectSql("WHERE b.id = ? AND (? = 1 OR b.archived_at IS NULL)")}`)
+      .get(batchId, includeArchived ? 1 : 0) || null
+  );
+}
+
+export function batchExists(batchId, options = {}) {
+  return Boolean(getBatchById(batchId, options));
+}
+
+function normalizeBatchArchiveInput(input) {
+  const reason = String(input?.reason || "other").trim();
+  if (!batchArchiveReasons.has(reason)) {
+    const error = new Error("Invalid archive reason");
+    error.statusCode = 400;
+    error.issues = [...batchArchiveReasons].sort();
+    throw error;
+  }
+
+  const note = String(input?.note || "").trim();
+  if (note.length > BATCH_ARCHIVE_NOTE_MAX_LENGTH) {
+    const error = new Error(`Archive note must be ${BATCH_ARCHIVE_NOTE_MAX_LENGTH} characters or less`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { reason, note };
+}
+
+export function archiveBatch(batchId, input = {}) {
+  if (!getBatchById(batchId, { includeArchived: true })) {
+    const error = new Error("Batch not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const normalized = normalizeBatchArchiveInput(input);
+  getDatabase()
+    .prepare(
+      `UPDATE batches
+       SET archived_at = ?,
+           archive_reason = ?,
+           archive_note = ?
+       WHERE id = ?`
+    )
+    .run(nowIso(), normalized.reason, normalized.note, batchId);
+  return getBatchById(batchId, { includeArchived: true });
+}
+
+export function restoreBatch(batchId) {
+  if (!getBatchById(batchId, { includeArchived: true })) {
+    const error = new Error("Batch not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  getDatabase()
+    .prepare(
+      `UPDATE batches
+       SET archived_at = NULL,
+           archive_reason = NULL,
+           archive_note = NULL
+       WHERE id = ?`
+    )
+    .run(batchId);
+  return getBatchById(batchId, { includeArchived: true });
+}
+
+export function getBatchDeleteCounts(batchId) {
+  if (!getBatchById(batchId, { includeArchived: true })) {
+    const error = new Error("Batch not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const row = getDatabase()
+    .prepare(
+      `SELECT
+        COUNT(i.id) AS items,
+        COUNT(e.id) AS evaluations
+       FROM batches b
+       LEFT JOIN items i ON i.batch_id = b.id
+       LEFT JOIN evaluations e ON e.item_id = i.id
+       WHERE b.id = ?`
+    )
+    .get(batchId);
+  return {
+    items: row.items || 0,
+    evaluations: row.evaluations || 0,
+  };
+}
+
+export function deleteBatchRecord(batchId) {
+  const result = getDatabase().prepare("DELETE FROM batches WHERE id = ?").run(batchId);
+  if (result.changes === 0) {
+    const error = new Error("Batch not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  return { batchId, deleted: true };
 }
 
 export function getItemsForBatch(batchId) {

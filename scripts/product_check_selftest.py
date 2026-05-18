@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from product_check import ROOT_DIR, analyze_pair, analyze_rows, fetch_rows, write_visualizations
+from product_check_profiles import DEFAULT_PROFILE_METADATA, list_threshold_profiles, load_threshold_profile
 
 
 SELFTEST_DIR = ROOT_DIR / "data" / "product-checks" / "selftest"
@@ -240,6 +241,16 @@ def run_exclusion_fetch_selftest(database_path: Path) -> None:
 def main() -> int:
     shutil.rmtree(SELFTEST_DIR, ignore_errors=True)
     SELFTEST_DIR.mkdir(parents=True, exist_ok=True)
+    profile_listing = list_threshold_profiles()
+    assert_true(
+        DEFAULT_PROFILE_METADATA["thresholdProfileId"] in profile_listing["profiles"],
+        "default Product Check profile should be listed",
+    )
+    assert_true(
+        load_threshold_profile(DEFAULT_PROFILE_METADATA["thresholdProfileId"])["thresholdProfileDigest"]
+        == DEFAULT_PROFILE_METADATA["thresholdProfileDigest"],
+        "Product Check profile digest should be stable",
+    )
 
     source = draw_product(canvas())
     unchanged = source.copy()
@@ -667,6 +678,9 @@ def main() -> int:
     payload = {
         "ok": True,
         "cases": cases,
+        "algorithmVersion": DEFAULT_PROFILE_METADATA["algorithmVersion"],
+        "thresholdProfileId": DEFAULT_PROFILE_METADATA["thresholdProfileId"],
+        "thresholdProfileDigest": DEFAULT_PROFILE_METADATA["thresholdProfileDigest"],
         "overlays": overlays,
         "parallelItems": [item["itemId"] for item in parallel_items],
         "exclusionFetch": "passed",

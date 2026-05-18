@@ -44,6 +44,10 @@ function hash(value) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+export function computeSourceDigest(content) {
+  return `sha256:${createHash("sha256").update(String(content ?? ""), "utf8").digest("hex")}`;
+}
+
 function slug(value) {
   return String(value || "")
     .toLowerCase()
@@ -367,6 +371,23 @@ async function readResourceRecords({ files: selectedFiles = [] } = {}) {
   return { records, errors, files };
 }
 
+async function readResourceFileContent(fileName) {
+  const sourceFile = normalizeResourceFileName(fileName);
+  try {
+    return {
+      sourceFile,
+      content: await readFile(path.join(resourceDir, sourceFile), "utf8"),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      const notFound = new Error(`Resource file not found: ${sourceFile}`);
+      notFound.statusCode = 404;
+      throw notFound;
+    }
+    throw error;
+  }
+}
+
 function recordsFromJsonPayload(payload, sourceFile) {
   const records = [];
   const errors = [];
@@ -385,13 +406,84 @@ function recordsFromJsonPayload(payload, sourceFile) {
   return { records, errors };
 }
 
-function readUploadedRecords({ fileName, content }) {
+function fieldCoverageFromPayloadItems(items) {
+  const fields = ["model", "text", "url", "optimizationPrompt", "resultUrl"];
+  const coverage = Object.fromEntries(fields.map((field) => [field, 0]));
+  for (const item of items) {
+    const model = String(item?.model || item?.provider || "").trim();
+    const text = extractText(item);
+    const url = extractUrl(item);
+    const optimizationPrompt = String(item?.optimizationPrompt || item?.optimization_prompt || "").trim();
+    const resultUrl = String(item?.resultUrl || item?.result_url || "").trim();
+    if (model) coverage.model += 1;
+    if (text) coverage.text += 1;
+    if (url) coverage.url += 1;
+    if (optimizationPrompt) coverage.optimizationPrompt += 1;
+    if (resultUrl) coverage.resultUrl += 1;
+  }
+  return coverage;
+}
+
+function buildPreflight({ source, sourceFile, content }) {
+  const raw = String(content ?? "");
+  const byteLength = Buffer.byteLength(raw, "utf8");
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    const error = new Error(source === "upload" ? "Uploaded file is not valid JSON" : "Resource file is not valid JSON");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const payloadItems = normalizeJsonPayload(payload);
+  const parsed = recordsFromJsonPayload(payload, sourceFile);
+  const modelCounts = parsed.records.reduce((acc, record) => {
+    acc[record.model] = (acc[record.model] || 0) + 1;
+    return acc;
+  }, {});
+  const seenImportKeys = new Set();
+  let withinFileDuplicates = 0;
+  for (const record of parsed.records) {
+    if (seenImportKeys.has(record.importKey)) {
+      withinFileDuplicates += 1;
+    }
+    seenImportKeys.add(record.importKey);
+  }
+
+  return {
+    source,
+    sourceFile,
+    sourceDigest: computeSourceDigest(raw),
+    sourceSizeBytes: byteLength,
+    totalRecords: payloadItems.length,
+    validRecords: parsed.records.length,
+    invalidRecords: parsed.errors.length,
+    modelCounts,
+    fieldCoverage: fieldCoverageFromPayloadItems(payloadItems),
+    duplicates: {
+      withinFile: withinFileDuplicates,
+    },
+    errors: parsed.errors.map((error) => ({
+      index: error.index,
+      field: null,
+      message: error.error,
+    })),
+  };
+}
+
+function parseUploadedRecords({ fileName, content, expectedDigest } = {}) {
   const sourceFile = normalizeUploadedJsonFileName(fileName);
   const raw = String(content ?? "");
   const byteLength = Buffer.byteLength(raw, "utf8");
   if (byteLength > MAX_UPLOAD_JSON_BYTES) {
     const error = new Error(`Uploaded JSON exceeds ${MAX_UPLOAD_JSON_BYTES} bytes`);
     error.statusCode = 413;
+    throw error;
+  }
+  if (expectedDigest && computeSourceDigest(raw) !== expectedDigest) {
+    const error = new Error("Source changed after preflight");
+    error.statusCode = 409;
     throw error;
   }
 
@@ -408,6 +500,32 @@ function readUploadedRecords({ fileName, content }) {
     ...recordsFromJsonPayload(payload, sourceFile),
     files: [sourceFile],
   };
+}
+
+export async function preflightResourceJson({ file } = {}) {
+  const sourceFile = normalizeResourceFileName(file);
+  const { content } = await readResourceFileContent(sourceFile);
+  return buildPreflight({
+    source: "resource",
+    sourceFile,
+    content,
+  });
+}
+
+export function preflightUploadedJson({ fileName, content } = {}) {
+  const sourceFile = normalizeUploadedJsonFileName(fileName);
+  const raw = String(content ?? "");
+  const byteLength = Buffer.byteLength(raw, "utf8");
+  if (byteLength > MAX_UPLOAD_JSON_BYTES) {
+    const error = new Error(`Uploaded JSON exceeds ${MAX_UPLOAD_JSON_BYTES} bytes`);
+    error.statusCode = 413;
+    throw error;
+  }
+  return buildPreflight({
+    source: "upload",
+    sourceFile,
+    content: raw,
+  });
 }
 
 async function writeImportRunSummary(batchId, summary) {
@@ -711,7 +829,7 @@ async function importRecordsBatch({
   return result;
 }
 
-export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress, cacheWorkers } = {}) {
+export async function importResourceBatch({ batchName, downloadImages = true, files = [], onProgress, cacheWorkers, sourceDigest } = {}) {
   if (files.length !== 1) {
     const error = new Error("Exactly one resource JSON file must be selected for import");
     error.statusCode = 400;
@@ -719,6 +837,14 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   }
 
   const sourceFile = normalizeResourceFileName(files[0]);
+  if (sourceDigest) {
+    const { content } = await readResourceFileContent(sourceFile);
+    if (computeSourceDigest(content) !== sourceDigest) {
+      const error = new Error("Source changed after preflight");
+      error.statusCode = 409;
+      throw error;
+    }
+  }
   const { records, errors, files: importedFiles } = await readResourceRecords({ files: [sourceFile] });
   return importRecordsBatch({
     batchName,
@@ -733,9 +859,13 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   });
 }
 
-export async function importUploadedJsonBatch({ batchName, content, downloadImages = true, fileName, onProgress, cacheWorkers } = {}) {
+export async function importUploadedJsonBatch({ batchName, content, downloadImages = true, fileName, onProgress, cacheWorkers, sourceDigest } = {}) {
   const sourceFile = normalizeUploadedJsonFileName(fileName);
-  const { records, errors, files: importedFiles } = readUploadedRecords({ fileName: sourceFile, content });
+  const { records, errors, files: importedFiles } = parseUploadedRecords({
+    fileName: sourceFile,
+    content,
+    expectedDigest: sourceDigest,
+  });
   return importRecordsBatch({
     batchName,
     cacheWorkers,

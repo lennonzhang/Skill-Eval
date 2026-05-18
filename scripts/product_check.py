@@ -25,12 +25,13 @@ import numpy as np
 from PIL import Image, ImageOps
 from skimage.metrics import structural_similarity
 
+from product_check_profiles import DEFAULT_PROFILE_METADATA, list_threshold_profiles, load_threshold_profile
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = ROOT_DIR / "data" / "app.sqlite"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "product-checks"
 SUPPORTED_IMAGE_STATUSES = {"success"}
-SCORE_VERSION = "product-check-v3.2"
+SCORE_VERSION = DEFAULT_PROFILE_METADATA["algorithmVersion"]
 
 
 def log_progress(event: dict[str, Any]) -> None:
@@ -1418,6 +1419,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visualize", action="store_true", help="Write source mask, match, and diff overlays.")
     parser.add_argument("--include-excluded", action="store_true", help="Include items excluded from review statistics.")
     parser.add_argument(
+        "--threshold-profile",
+        default=DEFAULT_PROFILE_METADATA["thresholdProfileId"],
+        help="Threshold profile id to record with this Product Check run.",
+    )
+    parser.add_argument("--list-threshold-profiles", action="store_true", help="List available threshold profiles and exit.")
+    parser.add_argument(
         "--workers",
         type=int,
         default=default_worker_count(),
@@ -1429,8 +1436,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.list_threshold_profiles:
+        print(json.dumps(list_threshold_profiles(), ensure_ascii=False, indent=2))
+        return 0
     if args.item and args.all:
         parser.error("--item and --all cannot be combined")
+
+    try:
+        profile_metadata = load_threshold_profile(args.threshold_profile)
+    except ValueError as error:
+        parser.error(str(error))
 
     rows, filters = fetch_rows(args)
     output_root = Path(args.output_dir)
@@ -1447,12 +1462,21 @@ def main() -> int:
             "outputDir": _relpath(output_dir),
             "visualize": args.visualize,
             "workers": normalize_worker_count(args.workers),
+            "algorithmVersion": profile_metadata["algorithmVersion"],
+            "thresholdProfileId": profile_metadata["thresholdProfileId"],
+            "thresholdProfileDigest": profile_metadata["thresholdProfileDigest"],
         }
     )
     items = analyze_rows(rows, output_dir, args.visualize, normalize_worker_count(args.workers))
     payload = {
         "ok": True,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "algorithmVersion": profile_metadata["algorithmVersion"],
+        "thresholdProfileId": profile_metadata["thresholdProfileId"],
+        "thresholdProfileDigest": profile_metadata["thresholdProfileDigest"],
+        "thresholdProfile": profile_metadata["thresholdProfile"],
+        "includeExcluded": bool(args.include_excluded),
+        "workers": normalize_worker_count(args.workers),
         "filters": filters,
         "output": {"dir": _relpath(output_dir)},
         "summary": summarize(items),
@@ -1461,7 +1485,16 @@ def main() -> int:
 
     result_path = output_dir / "results.json"
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    log_progress({"event": "product-check:finish", "output": _relpath(result_path), "summary": payload["summary"]})
+    log_progress(
+        {
+            "event": "product-check:finish",
+            "output": _relpath(result_path),
+            "summary": payload["summary"],
+            "algorithmVersion": profile_metadata["algorithmVersion"],
+            "thresholdProfileId": profile_metadata["thresholdProfileId"],
+            "thresholdProfileDigest": profile_metadata["thresholdProfileDigest"],
+        }
+    )
     return 0
 
 

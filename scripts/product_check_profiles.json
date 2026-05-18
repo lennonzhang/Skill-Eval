@@ -1,0 +1,35 @@
+{
+  "algorithmVersion": "product-check-v3.3",
+  "defaultProfileId": "stable-2026-05-18",
+  "profiles": {
+    "stable-2026-05-18": {
+      "description": "Stable local product-preservation thresholds tuned for white-background source products.",
+      "offset": {
+        "minimumMovePx": 12,
+        "bboxDiagonalRatio": 0.025,
+        "hardGateImprovement": 0.035,
+        "hardGateMatchScore": 0.72,
+        "registrationJitterMatchScore": 0.92
+      },
+      "material": {
+        "severeMeanDiff": 0.18,
+        "severeP90Diff": 0.4,
+        "severeSsimBelow": 0.62,
+        "severeNccBelow": 0.4,
+        "moderateMeanDiff": 0.1,
+        "moderateP90Diff": 0.22,
+        "mildMeanDiff": 0.06,
+        "mildP90Diff": 0.12
+      },
+      "geometry": {
+        "severeContourDiff": 0.55,
+        "moderateContourDiff": 0.4,
+        "mildContourDiff": 0.3
+      },
+      "hole": {
+        "moderateBoundaryDiff": 0.42,
+        "mildBoundaryDiff": 0.3
+      }
+    }
+  }
+}
