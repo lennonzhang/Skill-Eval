@@ -7,13 +7,21 @@
     "dev": "node server.js",
     "clear:evaluations": "node scripts/clear-evaluations.js",
     "import:resource": "node scripts/import.js",
-    "check": "node --check server.js && node --check scripts/clear-evaluations.js && node --check scripts/import.js && node --check scripts/run-python.js && node --check scripts/selftest.js && node --check scripts/smoke.js && node --check src/db.js && node --check src/image-fetch.js && node --check src/importer.js && node --check src/tasks.js && node --check public/app.js && node --check public/scoring.js && node scripts/run-python.js -m py_compile scripts/product_check.py scripts/product_check_selftest.py",
+    "check": "node --check server.js && node --check scripts/check-test-residue.js && node --check scripts/cleanup-test-data.js && node --check scripts/clear-evaluations.js && node --check scripts/import.js && node --check scripts/run-python.js && node --check scripts/review-utils-selftest.js && node --check scripts/selftest.js && node --check scripts/smoke.js && node --check src/db.js && node --check src/image-fetch.js && node --check src/importer.js && node --check src/paths.js && node --check src/tasks.js && node --check public/app.js && node --check public/review-utils.js && node --check public/scoring.js && node scripts/run-python.js -m py_compile scripts/product_check.py scripts/product_check_selftest.py",
     "product-check": "node scripts/run-python.js scripts/product_check.py",
     "product-check:selftest": "node scripts/run-python.js scripts/product_check_selftest.py",
+    "review-utils:selftest": "node scripts/review-utils-selftest.js",
     "selftest": "node scripts/selftest.js",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "test:cleanup": "node scripts/cleanup-test-data.js",
+    "test:e2e": "playwright test",
+    "test:residue": "node scripts/check-test-residue.js",
+    "test:visual": "playwright test --grep @visual"
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }

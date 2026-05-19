@@ -15,8 +15,10 @@ import {
   getBatchStats,
   getBatches,
   getDatabase,
+  getAuditEvents,
   getItemsForBatch,
   insertItem,
+  recordAuditEvent,
   restoreBatch,
   saveEvaluation,
   setItemExclusion,
@@ -297,6 +299,22 @@ try {
   assert.equal(testStats.total_items, 2);
   assert.equal(testStats.excluded_items, 0);
   assert.equal(testStats.reviewed_items, 1);
+
+  const auditEvent = recordAuditEvent({
+    eventType: "selftest.event",
+    entityType: "batch",
+    entityId: testBatchId,
+    batchId: testBatchId,
+    itemId: testItemId,
+    payload: { count: 1, note: "rollback-safe audit" },
+  });
+  assert.equal(auditEvent.eventType, "selftest.event");
+  assert.equal(auditEvent.payload.count, 1);
+  const auditEvents = getAuditEvents({ batchId: testBatchId, limit: 5 });
+  assert.equal(auditEvents.length, 1);
+  assert.equal(auditEvents[0].eventType, "selftest.event");
+  assert.equal(auditEvents[0].itemId, testItemId);
+  assert.deepEqual(auditEvents[0].payload, { count: 1, note: "rollback-safe audit" });
 } finally {
   db.exec("ROLLBACK");
 }
@@ -353,6 +371,7 @@ const afterRollback = getBatchStats(testBatchId).summary;
 assert.equal(afterRollback.total_items, 0);
 assert.equal(afterRollback.reviewed_items, 0);
 assert.equal(getBatchById(testBatchId, { includeArchived: true }), null);
+assert.equal(getAuditEvents({ batchId: testBatchId, limit: 5 }).length, 0);
 
 db.exec("BEGIN");
 try {

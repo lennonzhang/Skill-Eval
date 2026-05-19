@@ -1,14 +1,9 @@
 import { mkdirSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 import { calculateOverallScore, scoreFieldNames, validateEvaluationInput } from "../public/scoring.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, "..");
-const dataDir = path.join(rootDir, "data");
-const databasePath = path.join(dataDir, "app.sqlite");
+import { databasePath, dataDir } from "./paths.js";
 
 let db;
 
@@ -40,6 +35,7 @@ export function initializeDatabase() {
   // items.raw_json_file/raw_index preserve traceability without storing external URLs in reports.
   // batches.archived_at/archive_reason/archive_note are reversible local lifecycle metadata.
   // items.excluded_at/exclude_reason/exclude_note are soft exclusion metadata; excluded rows stay visible but leave review stats.
+  // audit_events stores local, sanitized mutation traces; it is intentionally not cascaded on batch deletion.
   // evaluations stores human review only; automated Product Check remains advisory file output.
   db.exec(`
     CREATE TABLE IF NOT EXISTS batches (
@@ -80,6 +76,23 @@ export function initializeDatabase() {
       exclude_note TEXT,
       UNIQUE(batch_id, import_key)
     );
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT,
+      batch_id TEXT,
+      item_id TEXT,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_batch_created
+      ON audit_events(batch_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_item_created
+      ON audit_events(item_id, created_at DESC);
 
   `);
   ensureBatchSchema();
@@ -305,6 +318,104 @@ export function getBatchById(batchId, { includeArchived = false } = {}) {
 
 export function batchExists(batchId, options = {}) {
   return Boolean(getBatchById(batchId, options));
+}
+
+function parseLimit(value, fallback = 100) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(500, Math.floor(parsed));
+}
+
+export function recordAuditEvent({ eventType, entityType, entityId = null, batchId = null, itemId = null, payload = {} }) {
+  const event = {
+    id: crypto.randomUUID(),
+    event_type: String(eventType || "").trim(),
+    entity_type: String(entityType || "").trim(),
+    entity_id: entityId || null,
+    batch_id: batchId || null,
+    item_id: itemId || null,
+    payload_json: JSON.stringify(payload || {}),
+    created_at: nowIso(),
+  };
+  if (!event.event_type || !event.entity_type) {
+    const error = new Error("Audit event type and entity type are required");
+    error.statusCode = 400;
+    throw error;
+  }
+  getDatabase()
+    .prepare(
+      `INSERT INTO audit_events (
+        id,
+        event_type,
+        entity_type,
+        entity_id,
+        batch_id,
+        item_id,
+        payload_json,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      event.id,
+      event.event_type,
+      event.entity_type,
+      event.entity_id,
+      event.batch_id,
+      event.item_id,
+      event.payload_json,
+      event.created_at
+    );
+  return {
+    id: event.id,
+    eventType: event.event_type,
+    entityType: event.entity_type,
+    entityId: event.entity_id,
+    batchId: event.batch_id,
+    itemId: event.item_id,
+    payload: JSON.parse(event.payload_json),
+    createdAt: event.created_at,
+  };
+}
+
+export function getAuditEvents({ batchId = "", itemId = "", limit = 100 } = {}) {
+  const clauses = [];
+  const args = [];
+  if (batchId) {
+    clauses.push("batch_id = ?");
+    args.push(batchId);
+  }
+  if (itemId) {
+    clauses.push("item_id = ?");
+    args.push(itemId);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = getDatabase()
+    .prepare(
+      `SELECT
+        id,
+        event_type,
+        entity_type,
+        entity_id,
+        batch_id,
+        item_id,
+        payload_json,
+        created_at
+       FROM audit_events
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(...args, parseLimit(limit));
+  return rows.map((row) => ({
+    id: row.id,
+    eventType: row.event_type,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    batchId: row.batch_id,
+    itemId: row.item_id,
+    payload: JSON.parse(row.payload_json || "{}"),
+    createdAt: row.created_at,
+  }));
 }
 
 function normalizeBatchArchiveInput(input) {

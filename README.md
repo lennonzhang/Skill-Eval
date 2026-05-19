@@ -45,7 +45,11 @@ pnpm run dev
 pnpm run check
 pnpm run clear:evaluations -- --yes
 pnpm run selftest
+pnpm run review-utils:selftest
 pnpm run smoke
+pnpm run test:e2e
+pnpm run test:residue
+pnpm run test:cleanup
 pnpm run product-check:selftest
 pnpm run product-check -- --model gemini --batch latest --visualize
 ```
@@ -58,7 +62,12 @@ Command details:
 - `pnpm run check`: syntax-check server, scripts, database/importer code, frontend JS, and Python product-check scripts.
 - `pnpm run clear:evaluations -- --yes`: delete all local evaluation records. This is a local reset command and requires the explicit `--yes` guard.
 - `pnpm run selftest`: validate scoring persistence and statistics inside a rollback transaction.
-- `pnpm run smoke`: run read-only checks against a running local server.
+- `pnpm run review-utils:selftest`: validate URL-state helpers, task-card normalization, and virtual queue window math.
+- `pnpm run smoke`: run API/page checks against a running local server. It creates and deletes a temporary upload batch to verify import, lifecycle, exclusion, and audit behavior.
+- `pnpm run test:e2e`: run Playwright browser regressions against the review workbench.
+- `pnpm run test:visual`: reserved Playwright visual subset; tests marked with `@visual` run here.
+- `pnpm run test:residue`: check the active data root for `e2e-*`, `smoke-upload-*`, or `selftest-*` leftovers.
+- `pnpm run test:cleanup`: remove the Playwright test data root. It refuses to delete any non-test data directory.
 - `pnpm run product-check:selftest`: run synthetic OpenCV/skimage regression tests without using production data.
 - `pnpm run product-check -- ...`: run advisory product-preservation checks against cached images.
 
@@ -137,6 +146,81 @@ GET /api/tasks/latest?type=import
 Task snapshots are written under `data/task-runs/`. They do not include prompt text, source URLs, result URLs, or optimization prompts. Final business state remains in SQLite, `data/cache/`, `data/import-runs/`, and `data/product-checks/`.
 
 Running task snapshots are throttled to reduce local disk churn on large batches. `SKILL_EVAL_TASK_FLUSH_MS` controls the flush interval and defaults to `250`; final success or failure states are always flushed immediately.
+
+## Review Workbench State
+
+The review page keeps operator state in the URL so a reviewer can reload, share a local deep link, or return to the same work position:
+
+```text
+/?batch=<batchId>&item=<itemId>&model=<model>&status=<status>&q=<search>&lang=<en|zh>&archived=1
+```
+
+Supported `status` values are `all`, `active`, `unreviewed`, `reviewed`, and `excluded`. Invalid URL values fall back to safe defaults. The URL contains only local ids and filter state; it does not include prompt text, image URLs, comments, or scores.
+
+The left item queue uses fixed-height virtual rows for large batches. Only the visible window plus overscan rows are rendered, while the selected item still remains recoverable through the URL and the Current button. This keeps review scrolling responsive without changing the SQLite or API contract.
+
+## Test Isolation
+
+Runtime data lives under `data/` by default. Tests can redirect all SQLite and generated artifacts to an isolated root:
+
+```powershell
+$env:SKILL_EVAL_DATA_DIR = ".tmp/playwright-data"
+$env:SKILL_EVAL_TEST = "1"
+$env:SKILL_EVAL_LOG_LEVEL = "warn"
+pnpm run smoke
+pnpm run test:e2e
+pnpm run test:residue
+pnpm run test:cleanup
+```
+
+`SKILL_EVAL_DATA_DIR` controls:
+
+```text
+<dataDir>/app.sqlite
+<dataDir>/cache/
+<dataDir>/import-runs/
+<dataDir>/product-checks/
+<dataDir>/task-runs/
+```
+
+The review UI still uses stable virtual paths such as `/data/cache/<batchId>/<itemId>/source.png`. The server maps those virtual paths to the active data root, so tests can be isolated without changing frontend URLs or SQLite cache-path semantics.
+
+Playwright starts the dev server with `SKILL_EVAL_DATA_DIR=.tmp/playwright-data`, `SKILL_EVAL_TEST=1`, and `SKILL_EVAL_LOG_LEVEL=warn`. This keeps browser tests away from real `data/app.sqlite` and suppresses per-item JSONL progress while preserving warning and failure logs.
+
+`pnpm run test:residue` inspects the active data root for test-prefixed batches, audit entries, and artifacts. Run it against real `data/` before committing if you want to verify that browser/smoke tests did not touch local production-like review data.
+
+## Local Audit Log
+
+Local mutation events are recorded in SQLite in `audit_events`. This is for operator traceability, debugging, and test assertions, not for remote telemetry. The schema definition and comments live in `src/db.js`, keeping SQLite as the single source of truth.
+
+Current audited events include:
+
+```text
+import.start
+import.finish
+import.fail
+batch.archive
+batch.restore
+batch.delete_plan
+batch.delete
+item.exclude
+item.restore
+browser_cache.finish
+product_check.start
+product_check.finish
+product_check.fail
+```
+
+The audit payload is intentionally sanitized. It stores ids, counts, statuses, byte counts, reasons, note lengths, and error summaries. It does not store prompt text, source URLs, result URLs, optimization prompts, reviewer comments, or uploaded JSON content.
+
+Audit events are available locally:
+
+```text
+GET /api/audit-events?batchId=<batchId>&limit=100
+GET /api/audit-events?itemId=<itemId>&limit=100
+```
+
+`audit_events` is not cascaded on batch deletion, so a local deletion can still be traced. Delete events record the delete plan counts before the batch row is removed.
 
 ## Batch Import
 
@@ -375,6 +459,8 @@ These files must stay local and must not be pushed to the remote repository:
 - SQLite database, WAL/SHM files, and cached images under `data/`.
 - Product-check outputs under `data/product-checks/`.
 - Import run summaries under `data/import-runs/`.
+- Browser test artifacts under `test-results/`, `playwright-report/`, and `blob-report/`.
+- Isolated test data under `.tmp/` or `data-test/`.
 - Future exported JSON, reports, screenshots, or review outputs.
 - Python virtual environments and cache files such as `.venv/`, `__pycache__/`, and `*.pyc`.
 
@@ -402,7 +488,10 @@ Recommended validation commands:
 ```bash
 pnpm run check
 pnpm run selftest
+pnpm run review-utils:selftest
 pnpm run product-check:selftest
-pnpm run product-check -- --model gemini --batch latest --visualize
 pnpm run smoke
+pnpm run test:e2e
+pnpm run test:visual
+pnpm run test:residue
 ```

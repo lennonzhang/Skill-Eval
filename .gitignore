@@ -52,6 +52,11 @@ dist/
 .vite/
 .worktrees/
 .venv/
+.tmp/
+data-test/
+playwright-report/
+test-results/
+blob-report/
 
 # Python local build/cache outputs.
 __pycache__/

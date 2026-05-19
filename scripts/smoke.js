@@ -26,6 +26,16 @@ async function postJson(path, body) {
   return { response, payload };
 }
 
+async function deleteJson(path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
 async function patchJson(path, body) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "PATCH",
@@ -184,6 +194,10 @@ if (uploadedBatch?.source_dir !== "upload" || uploadedBatch?.source_file !== upl
   throw new Error("Uploaded batch did not record upload source metadata");
 }
 batches = uploadedBatchBody.batches;
+let auditEvents = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=10`);
+if (!auditEvents.events.some((event) => event.eventType === "import.finish")) {
+  throw new Error("Audit log did not record import.finish for uploaded batch");
+}
 const resourcesAfterUpload = await getJson("/api/resources");
 if (resourcesAfterUpload.resources.some((resource) => resource.file === uploadFileName)) {
   throw new Error("Uploaded JSON was unexpectedly listed as a resource file");
@@ -195,6 +209,10 @@ const archiveResponse = await patchJson(`/api/batches/${uploadedTask.batchId}/ar
 });
 if (archiveResponse.response.status !== 200 || !archiveResponse.payload.batch?.archived_at) {
   throw new Error(`Archive endpoint returned HTTP ${archiveResponse.response.status}, expected archived batch`);
+}
+auditEvents = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=10`);
+if (!auditEvents.events.some((event) => event.eventType === "batch.archive")) {
+  throw new Error("Audit log did not record batch.archive");
 }
 const hiddenAfterArchive = await getJson("/api/batches");
 if (hiddenAfterArchive.batches.some((candidate) => candidate.id === uploadedTask.batchId)) {
@@ -208,9 +226,17 @@ const restoreResponse = await patchJson(`/api/batches/${uploadedTask.batchId}/re
 if (restoreResponse.response.status !== 200 || restoreResponse.payload.batch?.archived_at) {
   throw new Error(`Restore endpoint returned HTTP ${restoreResponse.response.status}, expected active batch`);
 }
+auditEvents = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=10`);
+if (!auditEvents.events.some((event) => event.eventType === "batch.restore")) {
+  throw new Error("Audit log did not record batch.restore");
+}
 const deletePlanResponse = await postJson(`/api/batches/${uploadedTask.batchId}/delete-plan`, {});
 if (deletePlanResponse.response.status !== 200 || deletePlanResponse.payload.plan?.items !== 1) {
   throw new Error(`Delete-plan endpoint returned HTTP ${deletePlanResponse.response.status}, expected one item`);
+}
+auditEvents = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=10`);
+if (!auditEvents.events.some((event) => event.eventType === "batch.delete_plan")) {
+  throw new Error("Audit log did not record batch.delete_plan");
 }
 if (deletePlanResponse.payload.plan.artifacts?.some((artifact) => !String(artifact.path).startsWith("data"))) {
   throw new Error("Delete-plan returned an artifact outside data/");
@@ -329,6 +355,10 @@ if (activeItems.length > 0) {
       throw new Error(`Exclude endpoint returned HTTP ${excludeResponse.response.status}, expected excluded item`);
     }
     exclusionApplied = true;
+    const excludeAudit = await getJson(`/api/audit-events?itemId=${encodeURIComponent(exclusionTarget.id)}&limit=10`);
+    if (!excludeAudit.events.some((event) => event.eventType === "item.exclude")) {
+      throw new Error("Audit log did not record item.exclude");
+    }
 
     const excludedList = await getJson(`/api/batches/${batch.id}/items`);
     const excludedItem = excludedList.items.find((item) => item.id === exclusionTarget.id);
@@ -353,6 +383,10 @@ if (activeItems.length > 0) {
       const restoreResponse = await patchJson(`/api/items/${exclusionTarget.id}/exclusion`, { excluded: false });
       if (restoreResponse.response.status !== 200 || restoreResponse.payload.item?.is_excluded) {
         throw new Error(`Restore endpoint returned HTTP ${restoreResponse.response.status}, expected active item`);
+      }
+      const restoreAudit = await getJson(`/api/audit-events?itemId=${encodeURIComponent(exclusionTarget.id)}&limit=10`);
+      if (!restoreAudit.events.some((event) => event.eventType === "item.restore")) {
+        throw new Error("Audit log did not record item.restore");
       }
     }
   }
@@ -393,6 +427,19 @@ const models = [...new Set(items.map((item) => item.model))].sort();
 const failedImages = items.filter(
   (item) => item.source_fetch_status !== "success" || item.result_fetch_status !== "success"
 );
+
+if (batch.id === uploadedTask.batchId) {
+  const cleanupResponse = await deleteJson(`/api/batches/${uploadedTask.batchId}`, {
+    confirmBatchId: uploadedTask.batchId,
+  });
+  if (cleanupResponse.response.status !== 200 || !cleanupResponse.payload.deleted) {
+    throw new Error(`Smoke cleanup delete returned HTTP ${cleanupResponse.response.status}, expected deleted batch`);
+  }
+  const deleteAudit = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=20`);
+  if (!deleteAudit.events.some((event) => event.eventType === "batch.delete")) {
+    throw new Error("Audit log did not record batch.delete");
+  }
+}
 
 console.log(
   JSON.stringify(

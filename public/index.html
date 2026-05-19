@@ -109,8 +109,19 @@
       <section class="workspace">
         <aside class="queue" aria-label="Items" data-i18n-aria-label="queue.aria">
           <div class="queue-header">
-            <strong data-i18n="queue.title">Items</strong>
-            <span id="visibleCount">0 visible</span>
+            <div class="queue-title">
+              <strong data-i18n="queue.title">Items</strong>
+              <span id="visibleCount">0 visible</span>
+            </div>
+            <button
+              id="scrollCurrentItemButton"
+              class="queue-current-button"
+              type="button"
+              data-i18n="actions.scrollCurrent"
+              disabled
+            >
+              Current
+            </button>
           </div>
           <div id="itemList" class="item-list"></div>
         </aside>

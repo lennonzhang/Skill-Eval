@@ -28,8 +28,11 @@ from skimage.metrics import structural_similarity
 from product_check_profiles import DEFAULT_PROFILE_METADATA, list_threshold_profiles, load_threshold_profile
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_DATABASE = ROOT_DIR / "data" / "app.sqlite"
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "product-checks"
+DEFAULT_DATA_DIR = Path(os.environ.get("SKILL_EVAL_DATA_DIR", ROOT_DIR / "data"))
+if not DEFAULT_DATA_DIR.is_absolute():
+    DEFAULT_DATA_DIR = ROOT_DIR / DEFAULT_DATA_DIR
+DEFAULT_DATABASE = DEFAULT_DATA_DIR / "app.sqlite"
+DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "product-checks"
 SUPPORTED_IMAGE_STATUSES = {"success"}
 SCORE_VERSION = DEFAULT_PROFILE_METADATA["algorithmVersion"]
 
@@ -61,6 +64,10 @@ class BBox:
 
 
 def _relpath(path: Path) -> str:
+    try:
+        return (Path("data") / path.resolve().relative_to(DEFAULT_DATA_DIR)).as_posix()
+    except ValueError:
+        pass
     try:
         return path.resolve().relative_to(ROOT_DIR).as_posix()
     except ValueError:
@@ -1171,7 +1178,11 @@ def resolve_local_path(path_value: str | None) -> Path | None:
         return None
     path = Path(path_value)
     if not path.is_absolute():
-        path = ROOT_DIR / path
+        normalized = path.as_posix()
+        if normalized == "data" or normalized.startswith("data/"):
+            path = DEFAULT_DATA_DIR / Path(*Path(normalized).parts[1:])
+        else:
+            path = ROOT_DIR / path
     return path
 
 

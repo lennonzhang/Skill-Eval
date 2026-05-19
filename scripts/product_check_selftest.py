@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -16,7 +17,10 @@ from product_check import ROOT_DIR, analyze_pair, analyze_rows, fetch_rows, writ
 from product_check_profiles import DEFAULT_PROFILE_METADATA, list_threshold_profiles, load_threshold_profile
 
 
-SELFTEST_DIR = ROOT_DIR / "data" / "product-checks" / "selftest"
+DEFAULT_DATA_DIR = Path(os.environ.get("SKILL_EVAL_DATA_DIR", ROOT_DIR / "data"))
+if not DEFAULT_DATA_DIR.is_absolute():
+    DEFAULT_DATA_DIR = ROOT_DIR / DEFAULT_DATA_DIR
+SELFTEST_DIR = DEFAULT_DATA_DIR / "product-checks" / "selftest"
 
 
 def assert_true(condition: bool, message: str) -> None:

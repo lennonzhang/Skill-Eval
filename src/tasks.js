@@ -1,11 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, "..");
-const taskRunsDir = path.join(rootDir, "data", "task-runs");
+import { taskRunsDir } from "./paths.js";
 const DEFAULT_TASK_FLUSH_MS = 250;
 const taskFlushMs = normalizeTaskFlushMs(process.env.SKILL_EVAL_TASK_FLUSH_MS);
 const tasks = new Map();

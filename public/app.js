@@ -1,4 +1,14 @@
 import { calculateOverallScore, scoreFields, statusOptions, tagOptions } from "./scoring.js";
+import {
+  ITEM_OVERSCAN,
+  ITEM_ROW_HEIGHT,
+  normalizeTaskCard,
+  readReviewUrlState,
+  reviewUrlParamsFromState,
+  targetScrollTopForIndex,
+  taskProgressPercent,
+  virtualWindow,
+} from "./review-utils.js";
 
 const excludeReasons = ["bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"];
 
@@ -24,6 +34,7 @@ const translations = {
     "actions.exclude": "Exclude",
     "actions.restore": "Restore",
     "actions.cancel": "Cancel",
+    "actions.scrollCurrent": "Current",
     "batch.archive": "Archive",
     "batch.restore": "Restore",
     "batch.delete": "Delete",
@@ -218,6 +229,7 @@ const translations = {
     "actions.exclude": "排除",
     "actions.restore": "恢复",
     "actions.cancel": "取消",
+    "actions.scrollCurrent": "回到当前",
     "batch.archive": "归档",
     "batch.restore": "恢复",
     "batch.delete": "删除",
@@ -393,7 +405,10 @@ const translations = {
   },
 };
 
+const initialUrlState = readReviewUrlState(window.location.search);
+
 function initialLanguage() {
+  if (initialUrlState.language && translations[initialUrlState.language]) return initialUrlState.language;
   const saved = localStorage.getItem("skill-eval-language");
   if (saved && translations[saved]) return saved;
   return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -406,12 +421,12 @@ const state = {
   selectedResourceFile: "",
   selectedUploadFile: null,
   selectedUploadContent: "",
-  showArchivedBatches: false,
+  showArchivedBatches: initialUrlState.includeArchived,
   preflight: null,
   preflightSource: "",
   preflightError: "",
   preflightPending: false,
-  selectedBatchId: "",
+  selectedBatchId: initialUrlState.batchId,
   items: [],
   stats: null,
   productCheck: null,
@@ -420,7 +435,10 @@ const state = {
   importTask: null,
   importTaskPolling: null,
   taskProgressRenderTimer: null,
-  selectedItemId: "",
+  urlSyncTimer: null,
+  itemListRenderFrame: null,
+  itemListScrollTop: 0,
+  selectedItemId: initialUrlState.itemId,
   compareMode: "side-by-side",
   overlayOpacity: 55,
   overlayTop: "source",
@@ -433,9 +451,9 @@ const state = {
   autoBrowserCacheRun: null,
   reviewDrafts: {},
   filters: {
-    model: "all",
-    status: "all",
-    search: "",
+    model: initialUrlState.model,
+    status: initialUrlState.status,
+    search: initialUrlState.search,
   },
 };
 
@@ -445,6 +463,7 @@ const els = {
   taskProgressStrip: document.querySelector("#taskProgressStrip"),
   preflightPanel: document.querySelector("#preflightPanel"),
   batchSelect: document.querySelector("#batchSelect"),
+  scrollCurrentItemButton: document.querySelector("#scrollCurrentItemButton"),
   showArchivedBatches: document.querySelector("#showArchivedBatches"),
   archiveBatchButton: document.querySelector("#archiveBatchButton"),
   restoreBatchButton: document.querySelector("#restoreBatchButton"),
@@ -544,6 +563,31 @@ function isExcluded(item) {
 
 function selectedBatch() {
   return state.batches.find((batch) => batch.id === state.selectedBatchId);
+}
+
+function syncFilterControls() {
+  els.searchInput.value = state.filters.search;
+  els.modelFilter.value = state.filters.model;
+  els.statusFilter.value = state.filters.status;
+}
+
+function writeUrlState({ replace = true } = {}) {
+  const params = reviewUrlParamsFromState(state);
+  const query = params.toString();
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  if (nextUrl === `${window.location.pathname}${window.location.search}${window.location.hash}`) return;
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method]({}, "", nextUrl);
+}
+
+function scheduleUrlStateSync() {
+  if (state.urlSyncTimer) {
+    clearTimeout(state.urlSyncTimer);
+  }
+  state.urlSyncTimer = setTimeout(() => {
+    state.urlSyncTimer = null;
+    writeUrlState({ replace: true });
+  }, 200);
 }
 
 function filteredItems() {
@@ -731,20 +775,6 @@ function taskLabel(task) {
   return t("task.browserCache");
 }
 
-function taskDone(task) {
-  return Math.max(0, Number(task.done || 0));
-}
-
-function taskTotal(task) {
-  return Math.max(taskDone(task), Number(task.total || 0));
-}
-
-function taskPercent(task) {
-  const total = taskTotal(task);
-  if (!total) return 0;
-  return Math.max(0, Math.min(100, (taskDone(task) / total) * 100));
-}
-
 function importTaskSummary(task) {
   const summary = task.summary || {};
   const failed = Number(summary.failedSource || 0) + Number(summary.failedResult || 0);
@@ -788,6 +818,7 @@ function browserCacheTaskSummary(run) {
 }
 
 function taskSummary(task) {
+  if (!task) return "";
   if (task.type === "import") return importTaskSummary(task);
   if (task.type === "product-check") return productCheckTaskSummary(task);
   return browserCacheTaskSummary(task);
@@ -796,22 +827,22 @@ function taskSummary(task) {
 function taskCards() {
   const cards = [];
   if (state.importTask) {
-    cards.push({ ...state.importTask, type: "import" });
+    cards.push(normalizeTaskCard({ ...state.importTask, type: "import" }));
   }
   if (state.productCheckRun && state.selectedBatchId && state.productCheckRun.batchId === state.selectedBatchId) {
-    cards.push({ ...state.productCheckRun, type: "product-check" });
+    cards.push(normalizeTaskCard({ ...state.productCheckRun, type: "product-check" }));
   }
   if (state.autoBrowserCacheRun && state.autoBrowserCacheRun.batchId === state.selectedBatchId) {
     const status =
       state.autoBrowserCacheRun.status === "finished" && state.autoBrowserCacheRun.failed > 0 ? "partial" : state.autoBrowserCacheRun.status;
-    cards.push({ ...state.autoBrowserCacheRun, status, type: "browser-cache" });
+    cards.push(normalizeTaskCard({ ...state.autoBrowserCacheRun, status, type: "browser-cache" }));
   }
-  return cards;
+  return cards.filter(Boolean);
 }
 
 function renderTaskProgress() {
   if (!els.taskProgressStrip) return;
-  const cards = taskCards().filter((task) => ["queued", "running", "succeeded", "failed", "finished", "partial", "stale"].includes(task.status));
+  const cards = taskCards().filter((task) => ["queued", "running", "succeeded", "failed", "partial"].includes(task.status));
   if (cards.length === 0) {
     els.taskProgressStrip.innerHTML = "";
     els.taskProgressStrip.hidden = true;
@@ -821,9 +852,9 @@ function renderTaskProgress() {
   els.taskProgressStrip.innerHTML = cards
     .map((task) => {
       const status = normalizeTaskStatus(task.status);
-      const done = taskDone(task);
-      const total = taskTotal(task);
-      const message = task.type === "import" ? importTaskMessage(task) : task.error || task.message || task.latestMessage || taskSummary(task);
+      const done = task.done;
+      const total = task.total;
+      const message = task.type === "import" ? importTaskMessage(task.raw) : task.error || task.message || taskSummary(task.raw);
       return `
         <article class="task-card ${escapeHtml(status)}">
           <div class="task-card-head">
@@ -831,11 +862,11 @@ function renderTaskProgress() {
             <span>${escapeHtml(t(`task.${status}`))}</span>
           </div>
           <div class="task-card-progress" aria-label="${escapeHtml(t("task.progress", { done, total }))}">
-            <span style="width:${taskPercent(task)}%"></span>
+            <span style="width:${taskProgressPercent(task)}%"></span>
           </div>
           <div class="task-card-meta">
             <span>${escapeHtml(t("task.progress", { done, total }))}</span>
-            <span>${escapeHtml(taskSummary(task))}</span>
+            <span>${escapeHtml(taskSummary(task.raw))}</span>
           </div>
           <p>${escapeHtml(message)}</p>
         </article>
@@ -875,19 +906,59 @@ function renderFilters() {
   els.statusFilter.innerHTML = statusFilterOptions
     .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
     .join("");
-  els.statusFilter.value = state.filters.status;
+  syncFilterControls();
+}
+
+function selectedItemInVisibleList(visible = filteredItems()) {
+  return Boolean(state.selectedItemId && visible.some((item) => item.id === state.selectedItemId));
+}
+
+function updateScrollCurrentButton(visible = filteredItems()) {
+  els.scrollCurrentItemButton.disabled = !selectedItemInVisibleList(visible);
+}
+
+function resetItemListScroll() {
+  state.itemListScrollTop = 0;
+  els.itemList.scrollTop = 0;
+  if (state.itemListRenderFrame) {
+    cancelAnimationFrame(state.itemListRenderFrame);
+    state.itemListRenderFrame = null;
+  }
+}
+
+function scheduleItemListRender() {
+  if (state.itemListRenderFrame) return;
+  state.itemListRenderFrame = requestAnimationFrame(() => {
+    state.itemListRenderFrame = null;
+    state.itemListScrollTop = els.itemList.scrollTop;
+    renderItemList();
+  });
 }
 
 function renderItemList() {
   const visible = filteredItems();
   els.visibleCount.textContent = t("queue.visible", { count: visible.length });
+  const viewportHeight = els.itemList.clientHeight || 480;
 
   if (!visible.length) {
     els.itemList.innerHTML = `<div class="empty-list">${escapeHtml(t("queue.noMatching"))}</div>`;
+    updateScrollCurrentButton(visible);
     return;
   }
 
-  els.itemList.innerHTML = visible
+  const windowState = virtualWindow({
+    total: visible.length,
+    scrollTop: state.itemListScrollTop,
+    viewportHeight,
+    rowHeight: ITEM_ROW_HEIGHT,
+    overscan: ITEM_OVERSCAN,
+  });
+  const visibleSlice = visible.slice(windowState.startIndex, windowState.endIndex);
+
+  els.itemList.innerHTML = `
+    <div class="virtual-list-spacer" style="height:${windowState.totalHeight}px">
+      <div class="virtual-list-window" style="transform:translateY(${windowState.beforeHeight}px)">
+        ${visibleSlice
     .map((item) => {
       const reviewed = isReviewed(item);
       const excluded = isExcluded(item);
@@ -909,14 +980,38 @@ function renderItemList() {
         </button>
       `;
     })
-    .join("");
+    .join("")}
+      </div>
+    </div>
+  `;
 
   for (const button of els.itemList.querySelectorAll(".item-row")) {
     button.addEventListener("click", () => {
       state.selectedItemId = button.dataset.id;
+      scheduleUrlStateSync();
       render();
     });
   }
+  updateScrollCurrentButton(visible);
+}
+
+function scrollCurrentItemIntoView(behavior = "smooth") {
+  if (!state.selectedItemId) return;
+  const visible = filteredItems();
+  const index = visible.findIndex((item) => item.id === state.selectedItemId);
+  if (index < 0) {
+    updateScrollCurrentButton();
+    return;
+  }
+  const top = targetScrollTopForIndex({
+    index,
+    total: visible.length,
+    viewportHeight: els.itemList.clientHeight || 480,
+    rowHeight: ITEM_ROW_HEIGHT,
+  });
+  state.itemListScrollTop = top;
+  els.itemList.scrollTo({ top, behavior });
+  renderItemList();
 }
 
 function imageHtml(item, kind) {
@@ -1922,14 +2017,19 @@ function startImportTaskPolling(taskId) {
 async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   if (!batchId) {
     cancelAutoBrowserCache("");
+    state.selectedBatchId = "";
+    state.selectedItemId = "";
     state.items = [];
     state.stats = null;
     state.productCheck = null;
     state.productCheckRun = null;
+    resetItemListScroll();
     render();
+    scheduleUrlStateSync();
     return;
   }
   cancelAutoBrowserCache(batchId);
+  const previousBatchId = state.selectedBatchId;
   state.selectedBatchId = batchId;
   if (options.resetFilters) {
     state.filters = {
@@ -1952,16 +2052,21 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   state.productCheck = productCheckBody.productCheck;
   state.productCheckRun = productCheckRunBody.run;
   const visible = filteredItems();
-  state.selectedItemId =
-    keepSelectedItemId && state.items.some((item) => item.id === keepSelectedItemId)
-      ? keepSelectedItemId
-      : visible[0]?.id || state.items[0]?.id || "";
+  const keepVisibleItem = keepSelectedItemId && visible.some((item) => item.id === keepSelectedItemId);
+  state.selectedItemId = keepVisibleItem ? keepSelectedItemId : visible[0]?.id || state.items[0]?.id || "";
+  if (previousBatchId !== batchId || options.resetFilters) {
+    resetItemListScroll();
+  }
   if (state.selectedItemId !== previousSelectedItemId) {
     resetOverlayState();
   }
   await loadBatches();
   startProductCheckPolling();
   render();
+  scheduleUrlStateSync();
+  if (options.scrollToSelected) {
+    scrollCurrentItemIntoView("auto");
+  }
   if (!options.skipAutoBrowserCache) {
     startAutoBrowserCache(batchId).catch((error) => console.error(error));
   }
@@ -2178,7 +2283,9 @@ function jumpToNextUnreviewed() {
     .find((item) => !isExcluded(item) && !isReviewed(item));
   if (next) {
     state.selectedItemId = next.id;
+    scheduleUrlStateSync();
     render();
+    scrollCurrentItemIntoView();
   }
 }
 
@@ -2198,13 +2305,17 @@ function escapeHtml(value) {
 }
 
 els.batchSelect.addEventListener("change", () => {
-  loadBatch(els.batchSelect.value, "", { resetFilters: true }).catch(showFatalError);
+  loadBatch(els.batchSelect.value, "", { resetFilters: true, scrollToSelected: true }).catch(showFatalError);
 });
+
+els.scrollCurrentItemButton.addEventListener("click", scrollCurrentItemIntoView);
+
+els.itemList.addEventListener("scroll", scheduleItemListRender);
 
 els.showArchivedBatches.addEventListener("change", () => {
   state.showArchivedBatches = els.showArchivedBatches.checked;
   loadBatches()
-    .then(() => loadBatch(state.selectedBatchId || state.batches[0]?.id || ""))
+    .then(() => loadBatch(state.selectedBatchId || state.batches[0]?.id || "", state.selectedItemId, { scrollToSelected: true }))
     .catch(showFatalError);
 });
 
@@ -2224,6 +2335,7 @@ els.languageSelect.addEventListener("change", () => {
   captureReviewDraft(state.selectedItemId);
   state.language = els.languageSelect.value;
   localStorage.setItem("skill-eval-language", state.language);
+  scheduleUrlStateSync();
   render();
 });
 
@@ -2265,6 +2377,8 @@ els.runProductCheckButton.addEventListener("click", () => {
 els.modelFilter.addEventListener("change", () => {
   state.filters.model = els.modelFilter.value;
   state.selectedItemId = filteredItems()[0]?.id || "";
+  resetItemListScroll();
+  scheduleUrlStateSync();
   render();
 });
 
@@ -2274,12 +2388,16 @@ els.statusFilter.addEventListener("change", () => {
   if (!visible.some((item) => item.id === state.selectedItemId)) {
     state.selectedItemId = visible[0]?.id || "";
   }
+  resetItemListScroll();
+  scheduleUrlStateSync();
   render();
 });
 
 els.searchInput.addEventListener("input", () => {
   state.filters.search = els.searchInput.value;
   state.selectedItemId = filteredItems()[0]?.id || "";
+  resetItemListScroll();
+  scheduleUrlStateSync();
   render();
 });
 
@@ -2303,7 +2421,8 @@ if (state.selectedResourceFile) {
   await runResourcePreflight().catch(showFatalError);
 }
 if (state.selectedBatchId) {
-  await loadBatch(state.selectedBatchId).catch(showFatalError);
+  await loadBatch(state.selectedBatchId, initialUrlState.itemId, { scrollToSelected: true }).catch(showFatalError);
 } else {
   render();
+  writeUrlState({ replace: true });
 }

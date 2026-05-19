@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   createBatch,
@@ -15,12 +14,13 @@ import {
   updateSingleImageCacheStatus,
 } from "./db.js";
 import { fetchBinaryWithFallbacks } from "./image-fetch.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, "..");
-const resourceDir = path.join(rootDir, "resource");
-const cacheDir = path.join(rootDir, "data", "cache");
-const importRunsDir = path.join(rootDir, "data", "import-runs");
+import {
+  cacheDir,
+  dataAbsolutePathFromVirtual,
+  dataVirtualPath,
+  importRunsDir,
+  resourceDir,
+} from "./paths.js";
 
 const IMAGE_EXTENSIONS = new Map([
   ["image/jpeg", ".jpg"],
@@ -179,8 +179,8 @@ export async function cacheImage({ url, batchId, itemId, kind }) {
     throw new Error(`Unsupported image content-type: ${contentType || "missing"}`);
   }
 
-  const relativePath = path.join("data", "cache", batchId, itemId, `${kind}${ext}`);
-  const absolutePath = path.join(rootDir, relativePath);
+  const relativePath = dataVirtualPath("cache", batchId, itemId, `${kind}${ext}`);
+  const absolutePath = dataAbsolutePathFromVirtual(relativePath);
 
   await writeFile(absolutePath, response.body);
   return relativePath;
@@ -223,8 +223,8 @@ export async function cacheBrowserUploadedImage({ itemId, kind, buffer, contentT
 
   const itemDir = path.join(cacheDir, item.batch_id, itemId);
   mkdirSync(itemDir, { recursive: true });
-  const relativePath = path.join("data", "cache", item.batch_id, itemId, `${kind}${ext}`);
-  const absolutePath = path.join(rootDir, relativePath);
+  const relativePath = dataVirtualPath("cache", item.batch_id, itemId, `${kind}${ext}`);
+  const absolutePath = dataAbsolutePathFromVirtual(relativePath);
   await writeFile(absolutePath, buffer);
 
   updateSingleImageCacheStatus(itemId, kind, {
@@ -532,7 +532,7 @@ async function writeImportRunSummary(batchId, summary) {
   mkdirSync(importRunsDir, { recursive: true });
   const filePath = path.join(importRunsDir, `${batchId}.json`);
   await writeFile(filePath, JSON.stringify(summary, null, 2), "utf8");
-  return path.relative(rootDir, filePath);
+  return dataVirtualPath("import-runs", `${batchId}.json`);
 }
 
 async function cacheRecordImages({ record, batchId, itemId, itemIndex, total, downloadImages, onProgress }) {
@@ -790,7 +790,7 @@ async function importRecordsBatch({
     cachedSource,
     cachedResult,
     errors,
-    cacheDir: path.relative(rootDir, path.join(cacheDir, batchId)),
+    cacheDir: dataVirtualPath("cache", batchId),
     modelCounts: records.reduce((acc, record) => {
       acc[record.model] = (acc[record.model] || 0) + 1;
       return acc;

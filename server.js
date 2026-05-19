@@ -11,11 +11,13 @@ import {
   deleteBatchRecord,
   getBatchById,
   getBatchDeleteCounts,
+  getAuditEvents,
   getBatchStats,
   getBatches,
   getItemsForBatch,
   initializeDatabase,
   itemExists,
+  recordAuditEvent,
   restoreBatch,
   saveEvaluation,
   setItemExclusion,
@@ -36,15 +38,26 @@ import {
 } from "./src/importer.js";
 import { createTask, finishTask, getLatestTask, getTask, updateTask } from "./src/tasks.js";
 import { EvaluationValidationError } from "./public/scoring.js";
+import { dataDir, databasePath, productChecksDir } from "./src/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
-const dataDir = path.join(__dirname, "data");
-const productChecksDir = path.join(dataDir, "product-checks");
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "127.0.0.1";
 const productCheckWorkers = Math.max(1, Math.floor(Number(process.env.PRODUCT_CHECK_WORKERS || 4)) || 4);
 const importCacheWorkers = Math.max(1, Math.floor(Number(process.env.SKILL_EVAL_CACHE_WORKERS || 4)) || 4);
+const LOG_LEVELS = new Map([
+  ["silent", 0],
+  ["warn", 1],
+  ["info", 2],
+  ["debug", 3],
+]);
+const logLevelName = LOG_LEVELS.has(process.env.SKILL_EVAL_LOG_LEVEL)
+  ? process.env.SKILL_EVAL_LOG_LEVEL
+  : process.env.SKILL_EVAL_TEST === "1"
+    ? "warn"
+    : "info";
+const logLevel = LOG_LEVELS.get(logLevelName);
 const productCheckJobs = new Map();
 const productCheckBuffers = new Map();
 
@@ -59,12 +72,39 @@ function toCount(value, fallback = 0) {
   return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
+function logSeverity(scope, event) {
+  if (scope === "http" && event?.event === "request-rejected") {
+    return "debug";
+  }
+  if (event?.error || event?.event === "failed" || event?.event === "task-failed" || String(event?.type || "").endsWith(":fail")) {
+    return "warn";
+  }
+  const type = String(event?.type || event?.event || "");
+  if (scope === "import" && ["import:cache-start", "import:item", "import:image-start", "import:image-finish"].includes(type)) {
+    return "debug";
+  }
+  if (scope === "product-check" && event?.stream && event?.event === "product-check:item") {
+    return "debug";
+  }
+  return "info";
+}
+
+function shouldLog(scope, event) {
+  const severity = logSeverity(scope, event);
+  return logLevel >= (LOG_LEVELS.get(severity) ?? LOG_LEVELS.get("info"));
+}
+
 function logEvent(scope, event) {
+  if (!shouldLog(scope, event)) return;
   console.log(JSON.stringify({ at: nowIso(), scope, ...event }));
 }
 
 function sanitizeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isExpectedHttpError(error) {
+  return [400, 403, 404, 409, 413].includes(error?.statusCode);
 }
 
 function sendJson(res, statusCode, body) {
@@ -251,6 +291,30 @@ function ensureNoRunningBatchTask(batchId) {
     error.statusCode = 409;
     throw error;
   }
+}
+
+function audit(event) {
+  try {
+    return recordAuditEvent(event);
+  } catch (error) {
+    console.error("audit event failed", error);
+    return null;
+  }
+}
+
+function auditImportPayload({ task, source, sourceFile, result, error }) {
+  return {
+    taskId: task?.id || null,
+    source,
+    sourceFile,
+    batchId: result?.batch?.id || task?.batchId || null,
+    parsed: result?.parsed || 0,
+    inserted: result?.inserted || 0,
+    duplicate: result?.duplicate || 0,
+    parseErrors: result?.errors?.length || 0,
+    status: error ? "failed" : result ? "succeeded" : task?.status || "queued",
+    error: error ? sanitizeError(error) : null,
+  };
 }
 
 function normalizeProductCheckPath(productCheck) {
@@ -494,6 +558,12 @@ function startImportTask({ body, source = "resource" }) {
       parseErrors: 0,
     },
   });
+  audit({
+    eventType: "import.start",
+    entityType: "task",
+    entityId: task.id,
+    payload: auditImportPayload({ task, source, sourceFile }),
+  });
   const counters = { failedSource: 0, failedResult: 0 };
 
   setImmediate(async () => {
@@ -536,6 +606,13 @@ function startImportTask({ body, source = "resource" }) {
           importRun: result.importRun,
         },
       });
+      audit({
+        eventType: "import.finish",
+        entityType: "batch",
+        entityId: result.batch.id,
+        batchId: result.batch.id,
+        payload: auditImportPayload({ task, source, sourceFile, result }),
+      });
       logEvent("import", {
         event: "task-succeeded",
         taskId: task.id,
@@ -547,6 +624,12 @@ function startImportTask({ body, source = "resource" }) {
       finishTask(task.id, "failed", {
         error: sanitizeError(error),
         message: "Import failed",
+      });
+      audit({
+        eventType: "import.fail",
+        entityType: "task",
+        entityId: task.id,
+        payload: auditImportPayload({ task, source, sourceFile, error }),
       });
       logEvent("import", {
         event: "task-failed",
@@ -718,12 +801,23 @@ async function startProductCheckRun(batchId) {
   });
   await writeFile(productCheckLogPath(batchId), "", "utf8");
   logEvent("product-check", { event: "start", batchId });
+  audit({
+    eventType: "product_check.start",
+    entityType: "batch",
+    entityId: batchId,
+    batchId,
+    payload: { workers: productCheckWorkers },
+  });
 
   const child = spawn(
     process.execPath,
     [
       "scripts/run-python.js",
       "scripts/product_check.py",
+      "--database",
+      databasePath,
+      "--output-dir",
+      productChecksDir,
       "--batch",
       batchId,
       "--visualize",
@@ -761,6 +855,13 @@ async function startProductCheckRun(batchId) {
     productCheckBuffers.delete(`${batchId}:stdout`);
     productCheckBuffers.delete(`${batchId}:stderr`);
     writeProductCheckStatus(batchId, next);
+    audit({
+      eventType: "product_check.fail",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: { error: error.message },
+    });
     logEvent("product-check", { event: "failed", batchId, error: error.message });
   });
   child.on("close", async (code) => {
@@ -795,6 +896,18 @@ async function startProductCheckRun(batchId) {
       error,
       latestMessage: code === 0 && !error ? "Product Check finished" : "Product Check failed",
     });
+    audit({
+      eventType: next.status === "succeeded" ? "product_check.finish" : "product_check.fail",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: {
+        status: next.status,
+        exitCode: code,
+        summary: next.summary || null,
+        error,
+      },
+    });
     logEvent("product-check", {
       event: next.status,
       batchId,
@@ -828,6 +941,17 @@ async function handleApi(req, res, url) {
     const type = url.searchParams.get("type") || "";
     const batchId = url.searchParams.get("batchId") || "";
     sendJson(res, 200, { task: getLatestTask({ type, batchId }) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/audit-events") {
+    sendJson(res, 200, {
+      events: getAuditEvents({
+        batchId: url.searchParams.get("batchId") || "",
+        itemId: url.searchParams.get("itemId") || "",
+        limit: url.searchParams.get("limit") || 100,
+      }),
+    });
     return;
   }
 
@@ -975,14 +1099,33 @@ async function handleApi(req, res, url) {
     const batchId = archiveMatch[1];
     ensureNoRunningBatchTask(batchId);
     const body = await readBody(req);
-    sendJson(res, 200, { batch: archiveBatch(batchId, body), batches: getBatches({ includeArchived: true }) });
+    const batch = archiveBatch(batchId, body);
+    audit({
+      eventType: "batch.archive",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: {
+        reason: batch.archive_reason,
+        noteLength: batch.archive_note?.length || 0,
+      },
+    });
+    sendJson(res, 200, { batch, batches: getBatches({ includeArchived: true }) });
     return;
   }
 
   const restoreMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/restore$/);
   if (req.method === "PATCH" && restoreMatch) {
     const batchId = restoreMatch[1];
-    sendJson(res, 200, { batch: restoreBatch(batchId), batches: getBatches({ includeArchived: true }) });
+    const batch = restoreBatch(batchId);
+    audit({
+      eventType: "batch.restore",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: {},
+    });
+    sendJson(res, 200, { batch, batches: getBatches({ includeArchived: true }) });
     return;
   }
 
@@ -990,7 +1133,20 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && deletePlanMatch) {
     const batchId = deletePlanMatch[1];
     ensureNoRunningBatchTask(batchId);
-    sendJson(res, 200, { plan: buildBatchDeletePlan(batchId) });
+    const plan = buildBatchDeletePlan(batchId);
+    audit({
+      eventType: "batch.delete_plan",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: {
+        items: plan.items,
+        evaluations: plan.evaluations,
+        artifacts: plan.artifacts.length,
+        totalBytes: plan.totalBytes,
+      },
+    });
+    sendJson(res, 200, { plan });
     return;
   }
 
@@ -1004,6 +1160,18 @@ async function handleApi(req, res, url) {
       return;
     }
     const plan = deleteBatchArtifacts(batchId);
+    audit({
+      eventType: "batch.delete",
+      entityType: "batch",
+      entityId: batchId,
+      batchId,
+      payload: {
+        items: plan.items,
+        evaluations: plan.evaluations,
+        artifacts: plan.artifacts.length,
+        totalBytes: plan.totalBytes,
+      },
+    });
     deleteBatchRecord(batchId);
     sendJson(res, 200, { deleted: true, plan });
     return;
@@ -1037,6 +1205,19 @@ async function handleApi(req, res, url) {
     try {
       const body = await readBody(req);
       const item = setItemExclusion(itemId, body);
+      audit({
+        eventType: item.is_excluded ? "item.exclude" : "item.restore",
+        entityType: "item",
+        entityId: itemId,
+        batchId: item.batch_id,
+        itemId,
+        payload: item.is_excluded
+          ? {
+              reason: item.exclude_reason,
+              noteLength: item.exclude_note?.length || 0,
+            }
+          : {},
+      });
       sendJson(res, 200, { item, stats: getBatchStats(item.batch_id) });
     } catch (error) {
       if ([400, 404].includes(error?.statusCode)) {
@@ -1079,6 +1260,18 @@ async function handleApi(req, res, url) {
         batchId: retry.batchId,
         kind: retry.kind,
         bytes: buffer.length,
+      });
+      audit({
+        eventType: "browser_cache.finish",
+        entityType: "item",
+        entityId: retry.itemId,
+        batchId: retry.batchId,
+        itemId: retry.itemId,
+        payload: {
+          kind: retry.kind,
+          fetchStatus: retry.fetchStatus,
+          bytes: buffer.length,
+        },
       });
       sendJson(res, 200, { retry });
     } catch (error) {
@@ -1129,11 +1322,18 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(indexHtml);
   } catch (error) {
-    console.error(error);
-    if ([400, 403, 404, 409, 413].includes(error?.statusCode)) {
+    if (isExpectedHttpError(error)) {
+      logEvent("http", {
+        event: "request-rejected",
+        method: req.method,
+        path: req.url,
+        statusCode: error.statusCode,
+        error: sanitizeError(error),
+      });
       sendError(res, error.statusCode, error.message);
       return;
     }
+    console.error(error);
     sendError(res, 500, "Unexpected server error", error instanceof Error ? error.message : String(error));
   }
 });
