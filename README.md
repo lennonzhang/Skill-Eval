@@ -5,10 +5,10 @@ Skill Eval is a local-first review tool for evaluating image-generation results 
 ## Current Features
 
 - Import task result JSON files from `resource/` or a browser-selected local JSON upload.
-- Preflight each resource/upload JSON before import, including parse counts, model counts, duplicate count, and a source digest.
+- Preflight each resource/upload JSON before import, including parse counts, model counts, duplicate count, source/content digests, and existing-batch digest warnings.
 - Extract model, original prompt, source image URL, optimized prompt, and result image URL.
 - Cache remote images under the local project folder at `data/cache/`.
-- Store batches, items, and evaluations in SQLite at `data/app.sqlite`.
+- Store batches, items, append-only review annotations, and latest evaluation snapshots in SQLite at `data/app.sqlite`.
 - Run a local Python product-consistency prototype against cached source/result images.
 - Provide a local review UI with:
   - Batch selection.
@@ -19,6 +19,7 @@ Skill Eval is a local-first review tool for evaluating image-generation results 
   - Original and optimized prompt display.
   - Weighted score controls.
   - Issue tags and reviewer comments.
+  - Reviewer identity display and per-item review history/audit timeline.
   - Batch progress and per-model statistics.
 
 ## Data Contract
@@ -41,12 +42,29 @@ Use pnpm scripts:
 
 ```bash
 pnpm run import:resource -- --file=<resource-file>.json
+pnpm run eval:report -- --batch=<batch-id|latest>
+pnpm run eval:report:validate -- --report=<data/reports/.../report.json>
+pnpm run eval:compare -- --batch=<batch-id|latest> --model-a=<model> --model-b=<model>
+pnpm run eval:compare -- --batch-a=<batch-id> --batch-b=<batch-id>
+pnpm run eval:compare:validate -- --compare=<data/reports/.../compare.json>
+pnpm run fixture:report:validate -- --report=<data/reports/.../report.json>
 pnpm run dev
+pnpm run serve
+pnpm run test-env:reset
+pnpm run test-env:reset:full
+pnpm run test-env:start
+pnpm run test-env:smoke
+pnpm run service:start
+pnpm run service:status
+pnpm run service:stop
+pnpm run service:restart
 pnpm run check
 pnpm run clear:evaluations -- --yes
 pnpm run selftest
 pnpm run review-utils:selftest
 pnpm run smoke
+pnpm run smoke:readonly
+pnpm run smoke:fixture
 pnpm run test:e2e
 pnpm run test:residue
 pnpm run test:cleanup
@@ -57,13 +75,30 @@ pnpm run product-check -- --model gemini --batch latest --visualize
 Command details:
 
 - `pnpm run import:resource -- --file=<name.json>`: import one JSON from `resource/` as one batch and cache images unless `--no-images` is passed.
+- `pnpm run eval:report -- --batch=<batch-id|latest>`: write a sanitized local report directory under `data/reports/` with `report.json`, `summary.csv`, and `index.html`. It includes batch digest provenance, rubric weights, aggregate stats, model dimension means, score buckets, tag counts, annotation counts, low-score rows, and optional Product Check disagreement rows. It excludes prompt text, URLs, optimized prompts, reviewer comments, reviewer identities, local image paths, and raw source file names.
+- `pnpm run eval:report:validate -- --report=<path>`: validate the sanitized report structure and privacy boundary for a generated `report.json`.
+- `pnpm run eval:compare -- --batch=<batch-id|latest> --model-a=<model> --model-b=<model>` or `pnpm run eval:compare -- --batch-a=<id> --batch-b=<id>`: write a sanitized model or batch comparison under `data/reports/` with aggregate score deltas, dimension deltas, tag deltas, paired win-rate metrics when rows can be matched by `import_key` or `raw_index`, and warnings when only aggregate comparison is available.
+- `pnpm run eval:compare:validate -- --compare=<path>`: validate the sanitized compare structure and privacy boundary for a generated `compare.json`.
+- `pnpm run fixture:report:validate -- --report=<path>`: validate a fixture-generated report against `tests/fixtures/expected/report-metrics.json` and confirm sanitized fixture prompts, URLs, optimized prompts, and reviewer comments did not leak into the report.
 - Review UI local upload: choose a local `.json` with the same format as `resource/*.json`, then click Import Upload. The uploaded JSON is parsed into one batch but is not copied into `resource/`.
-- `pnpm run dev`: start the local review server.
+- `pnpm run dev`: start a one-off local review server in the foreground.
+- `pnpm run serve`: start the same server with stable service semantics. `service:*` scripts use this command for the shared review service.
+- `pnpm run test-env:reset`: rebuild `.tmp/test-env-data/` from the local Gemini resource JSON files without downloading images. This is the default deterministic development seed.
+- `pnpm run test-env:reset:no-images`: explicit alias for the default no-image reset.
+- `pnpm run test-env:reset:full`: rebuild `.tmp/test-env-data/` and download/cache images. Use this when validating image cache or visual behavior.
+- `pnpm run test-env:start`: start the isolated test environment on `127.0.0.1:4174` with `.tmp/test-env-data/`.
+- `pnpm run test-env:smoke`: run the writable API/page smoke checks against the test environment on port `4174`.
+- `pnpm run service:start`: start the shared review service in the background on `127.0.0.1:4173` using real `data/`. Pass `-- -BindHost 0.0.0.0` only when LAN access is intentionally needed.
+- `pnpm run service:stop`: stop only the process listening on the shared service port after identifying it.
+- `pnpm run service:status`: show the shared service identity, port owner, health status, and log paths.
+- `pnpm run service:restart`: stop and start the shared service. Use this only after test-environment validation passes.
 - `pnpm run check`: syntax-check server, scripts, database/importer code, frontend JS, and Python product-check scripts.
 - `pnpm run clear:evaluations -- --yes`: delete all local evaluation records. This is a local reset command and requires the explicit `--yes` guard.
 - `pnpm run selftest`: validate scoring persistence and statistics inside a rollback transaction.
 - `pnpm run review-utils:selftest`: validate URL-state helpers, task-card normalization, and virtual queue window math.
 - `pnpm run smoke`: run API/page checks against a running local server. It creates and deletes a temporary upload batch to verify import, lifecycle, exclusion, and audit behavior.
+- `pnpm run smoke:readonly`: run GET-only health checks against a running server. Use this for the real shared service.
+- `pnpm run smoke:fixture`: start a temporary server on a dynamic local port, verify its `/api/health` test identity, run API smoke checks, import `tests/fixtures/sanitized-resource.json`, write fixed fixture evaluations through the API, generate `eval:report`, validate report schema/privacy/expected metrics, run residue checks in the isolated root, then stop the server and remove that data root.
 - `pnpm run test:e2e`: run Playwright browser regressions against the review workbench.
 - `pnpm run test:visual`: reserved Playwright visual subset; tests marked with `@visual` run here.
 - `pnpm run test:residue`: check the active data root for `e2e-*`, `smoke-upload-*`, or `selftest-*` leftovers.
@@ -80,6 +115,7 @@ Use Exclude when a row should remain traceable but should not affect review prog
 Supported exclude reasons are:
 
 ```text
+internal_test
 bad_input
 duplicate
 wrong_task
@@ -159,6 +195,37 @@ Supported `status` values are `all`, `active`, `unreviewed`, `reviewed`, and `ex
 
 The left item queue uses fixed-height virtual rows for large batches. Only the visible window plus overscan rows are rendered, while the selected item still remains recoverable through the URL and the Current button. This keeps review scrolling responsive without changing the SQLite or API contract.
 
+## Review Filters And Shortcuts
+
+The review queue supports compound filters in the main toolbar and the Filters drawer:
+
+- Score range.
+- Required and excluded issue tags.
+- Reviewer id/name.
+- Product Check product-preservation delta.
+- Cache state: both cached, any failed, any missing, source failed, or result failed.
+- Status filters including reviewed, needs recheck, failed, unreviewed, active, and excluded.
+
+Filter state is stored in the URL using local ids, enums, tags, and numbers only. It does not put prompt text, image URLs, comments, or scores into shared links.
+
+Keyboard shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| `J` / `K` | Next / previous visible item |
+| `Shift+J` / `Shift+K` | Next / previous unreviewed item |
+| `G` | Scroll the left queue back to the current item |
+| `1`-`5` | Set the active score dimension |
+| `Tab` / `Shift+Tab` | Move active score dimension |
+| `S` or `Ctrl+Enter` | Save current review |
+| `R` / `N` / `F` | Set status to reviewed / needs recheck / failed |
+| `E` | Focus the exclude control for the current active item |
+| `Shift+E` | Restore the current excluded item |
+| `?` | Open shortcut help |
+| `Esc` | Close shortcut help or the filter drawer |
+
+Global shortcuts are disabled while an input, select, textarea, or contenteditable field is focused.
+
 ## Test Isolation
 
 Runtime data lives under `data/` by default. Tests can redirect all SQLite and generated artifacts to an isolated root:
@@ -168,6 +235,7 @@ $env:SKILL_EVAL_DATA_DIR = ".tmp/playwright-data"
 $env:SKILL_EVAL_TEST = "1"
 $env:SKILL_EVAL_LOG_LEVEL = "warn"
 pnpm run smoke
+pnpm run smoke:fixture
 pnpm run test:e2e
 pnpm run test:residue
 pnpm run test:cleanup
@@ -182,6 +250,8 @@ pnpm run test:cleanup
 <dataDir>/product-checks/
 <dataDir>/task-runs/
 ```
+
+`SKILL_EVAL_RESOURCE_DIR` can point resource imports at an alternate local directory. `pnpm run smoke:fixture` uses this with `tests/fixtures/sanitized-resource.json` so fixture validation never reads real `resource/` data. The fixture command allocates a free port and checks `/api/health` for the expected test run id, data root, and resource root before running API smoke checks; this prevents a stale or user-started dev server from being mistaken for the fixture server. The fixture also writes deterministic review scores and annotations before generating a sanitized report, so schema drift, score aggregation drift, tag-count drift, and sensitive-field leakage are caught automatically.
 
 The review UI still uses stable virtual paths such as `/data/cache/<batchId>/<itemId>/source.png`. The server maps those virtual paths to the active data root, so tests can be isolated without changing frontend URLs or SQLite cache-path semantics.
 
@@ -209,7 +279,12 @@ browser_cache.finish
 product_check.start
 product_check.finish
 product_check.fail
+evaluation.save
 ```
+
+Saving a review writes one append-only row to `annotations`, updates `evaluations` as the latest snapshot for the item, and records an `evaluation.save` audit event.
+
+Reviewer identity is attribution, not authentication. `SKILL_EVAL_REVIEWER=id:name` is an optional server-level override and locks the UI to that reviewer when present. Without that override, each browser stores its reviewer id/display name in localStorage and sends it with review, exclude, archive/delete, import, Product Check, and browser-cache mutations through local request headers. This supports multiple reviewers opening the same LAN server from different browsers or machines while keeping the first version local-first and permission-free.
 
 The audit payload is intentionally sanitized. It stores ids, counts, statuses, byte counts, reasons, note lengths, and error summaries. It does not store prompt text, source URLs, result URLs, optimization prompts, reviewer comments, or uploaded JSON content.
 
@@ -230,6 +305,8 @@ One JSON file is one batch. There are two input sources with the same JSON data 
 - Local upload: choose one `.json` file from the browser and click Import Upload. The browser sends the file content to the local server for one-time ingestion. The uploaded JSON is not copied into `resource/`.
 
 The review UI runs a preflight before enabling import. Preflight uses the same parser and normalizer as the real import, but it does not write SQLite, does not create a batch, does not cache images, and does not write `data/import-runs/`. It reports valid/invalid rows, model counts, duplicate records, and a `sha256:` source digest. The final import sends that digest back to the server; if the source changed after preflight, the import fails with a digest mismatch instead of importing stale assumptions.
+
+Each imported batch records source provenance in SQLite: `source_sha256` is the raw JSON digest, `source_size_bytes` is the raw byte size, `content_sha256` is the normalized semantic item digest, and `import_schema_version` records the importer contract. The review UI shows short digests in the top bar and warns during preflight when an existing batch already has the same source digest.
 
 Each imported batch records the source file in SQLite as `batches.source_file`. `batches.source_dir` is `resource` for project-local resource imports and `upload` for browser-selected uploads. The import also writes a local summary:
 
@@ -367,17 +444,100 @@ Product-preservation score semantics:
 
 ## Local Access
 
-After starting the server, open:
+There are two local runtime modes:
+
+| Mode | Command | URL | Data root | Purpose |
+| --- | --- | --- | --- | --- |
+| Shared review service | `pnpm run service:start` | `http://127.0.0.1:4173` | `data/` | Real reviewers use this service on this machine. |
+| Test environment | `pnpm run test-env:start` | `http://127.0.0.1:4174` | `.tmp/test-env-data/` | Developers validate changes without touching real reviews. |
+
+Start or inspect the shared review service:
+
+```powershell
+pnpm run service:start
+pnpm run service:status
+```
+
+The shared service binds to `127.0.0.1:4173` by default and writes logs to:
+
+```text
+data/logs/server.log
+data/logs/server.err.log
+```
+
+Each shared-service start rotates non-empty current logs into:
+
+```text
+data/logs/archive/
+```
+
+Only the newest 10 `server-*.log` files and newest 10 `server-*.err.log` files are retained. The running service identity is stored in:
+
+```text
+data/service.pid.json
+```
+
+To prepare the test environment from local real-sample resource data:
+
+```powershell
+pnpm run test-env:reset
+```
+
+This rebuilds `.tmp/test-env-data/` by importing:
+
+```text
+resource/gemini_tasks_20260516-20260517.json
+resource/Gemini_tasks_20260518-20260519.json
+```
+
+The default reset skips image downloads so normal development is fast and does not depend on remote image URLs. Use the full reset only when the change touches image caching or visual inspection:
+
+```powershell
+pnpm run test-env:reset:full
+```
+
+Then start the test server:
+
+```powershell
+pnpm run test-env:start
+```
+
+The standard development validation flow is:
+
+```powershell
+pnpm run check
+pnpm run selftest
+pnpm run test-env:smoke
+```
+
+`pnpm run test-env:smoke` runs the writable smoke checks only against `127.0.0.1:4174`. Do not run the writable `pnpm run smoke` against the shared service because it creates and deletes temporary test data.
+
+After validation passes, restart the shared service once and run the read-only health check:
+
+```powershell
+pnpm run service:restart
+pnpm run smoke:readonly
+```
+
+`pnpm run smoke:readonly` performs only `GET` requests (`/api/health`, `/`, `/api/batches`, and the first available batch's items/stats), so it is safe for the real `data/` service.
+
+For one-off local development without the service scripts, start the server and open:
 
 ```text
 http://127.0.0.1:4173
 ```
 
-By default the dev server binds to `127.0.0.1`, so it is only reachable on the same machine. To allow another device on the same LAN to open it through this machine's IP address, bind to all interfaces:
+By default the dev server binds to `127.0.0.1`, so it is only reachable on the same machine. To allow another device on the same LAN to open it through this machine's IP address, bind to all interfaces or use `pnpm run service:start`:
 
 ```powershell
 $env:HOST = "0.0.0.0"
 pnpm run dev
+```
+
+For the background shared service, LAN exposure is explicit:
+
+```powershell
+pnpm run service:start -- -BindHost 0.0.0.0
 ```
 
 Then open `http://<this-machine-ip>:4173` from the other device. If that still cannot connect, allow Node.js or TCP port `4173` through Windows Firewall for the current network profile.
@@ -491,6 +651,7 @@ pnpm run selftest
 pnpm run review-utils:selftest
 pnpm run product-check:selftest
 pnpm run smoke
+pnpm run smoke:fixture
 pnpm run test:e2e
 pnpm run test:visual
 pnpm run test:residue

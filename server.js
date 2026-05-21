@@ -11,9 +11,13 @@ import {
   deleteBatchRecord,
   getBatchById,
   getBatchDeleteCounts,
+  getBatchBySourceDigest,
   getAuditEvents,
+  getAnnotationsForItem,
   getBatchStats,
   getBatches,
+  filterBatchItems,
+  getItemById,
   getItemsForBatch,
   initializeDatabase,
   itemExists,
@@ -38,7 +42,10 @@ import {
 } from "./src/importer.js";
 import { createTask, finishTask, getLatestTask, getTask, updateTask } from "./src/tasks.js";
 import { EvaluationValidationError } from "./public/scoring.js";
-import { dataDir, databasePath, productChecksDir } from "./src/paths.js";
+import { dataDir, databasePath, productChecksDir, resourceDir } from "./src/paths.js";
+
+const REVIEWER_ID_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+const PUBLIC_CACHE_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -62,6 +69,28 @@ const productCheckJobs = new Map();
 const productCheckBuffers = new Map();
 
 initializeDatabase();
+
+function listParam(searchParams, name) {
+  return String(searchParams.get(name) || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseItemFilters(searchParams) {
+  return {
+    model: searchParams.get("model") || "all",
+    status: searchParams.get("status") || "all",
+    search: searchParams.get("q") || "",
+    scoreMin: searchParams.get("scoreMin") || "",
+    scoreMax: searchParams.get("scoreMax") || "",
+    tagIncludes: listParam(searchParams, "tagIncludes"),
+    tagExcludes: listParam(searchParams, "tagExcludes"),
+    reviewer: searchParams.get("reviewer") || "",
+    productCheckDeltaMin: searchParams.get("productCheckDeltaMin") || "",
+    cacheStatus: searchParams.get("cacheStatus") || "all",
+  };
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -101,6 +130,98 @@ function logEvent(scope, event) {
 
 function sanitizeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function reviewerConfigPath() {
+  return path.join(dataDir, "reviewer.json");
+}
+
+function normalizeReviewer(input, source = "config") {
+  const id = String(input?.id || "").trim();
+  const name = String(input?.name || "").trim();
+  if (!id && !name) return { id: null, name: null, source: "none" };
+  if (!REVIEWER_ID_PATTERN.test(id)) {
+    const error = new Error("Reviewer id must be 1-64 characters: letters, numbers, dot, underscore, or dash");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (name.length > 120) {
+    const error = new Error("Reviewer name must be 120 characters or less");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { id, name: name || id, source, locked: source === "env" };
+}
+
+function reviewerFromEnv() {
+  const raw = String(process.env.SKILL_EVAL_REVIEWER || "").trim();
+  if (!raw) return null;
+  const separator = raw.indexOf(":");
+  if (separator === -1) return normalizeReviewer({ id: raw, name: raw }, "env");
+  return normalizeReviewer({ id: raw.slice(0, separator), name: raw.slice(separator + 1) }, "env");
+}
+
+function reviewerFromHeaders(req) {
+  const id = String(req.headers["x-skill-eval-reviewer-id"] || "").trim();
+  let name = String(req.headers["x-skill-eval-reviewer-name"] || "").trim();
+  if (name) {
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      const error = new Error("Reviewer name header is malformed");
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+  if (!id && !name) return null;
+  return normalizeReviewer({ id, name }, "browser");
+}
+
+function getConfigReviewer() {
+  const filePath = reviewerConfigPath();
+  if (!existsSync(filePath)) return { id: null, name: null, source: "none", locked: false };
+  return normalizeReviewer(JSON.parse(readFileSync(filePath, "utf8")), "config");
+}
+
+function getEffectiveReviewer(req = null) {
+  const envReviewer = reviewerFromEnv();
+  if (envReviewer) return envReviewer;
+  if (req) {
+    const headerReviewer = reviewerFromHeaders(req);
+    if (headerReviewer) return headerReviewer;
+  }
+  return getConfigReviewer();
+}
+
+function saveReviewerConfig(input) {
+  if (reviewerFromEnv()) {
+    const error = new Error("Reviewer is locked by SKILL_EVAL_REVIEWER");
+    error.statusCode = 409;
+    throw error;
+  }
+  const reviewer = normalizeReviewer(input, "config");
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(reviewerConfigPath(), JSON.stringify({ id: reviewer.id, name: reviewer.name, updatedAt: nowIso() }, null, 2), "utf8");
+  return reviewer;
+}
+
+function reviewerPayload(req = null) {
+  const reviewer = getEffectiveReviewer(req);
+  return reviewer.id || reviewer.name ? { id: reviewer.id, name: reviewer.name } : null;
+}
+
+function healthPayload() {
+  const payload = {
+    ok: true,
+    pid: process.pid,
+    test: process.env.SKILL_EVAL_TEST === "1",
+  };
+  if (payload.test) {
+    payload.testRunId = process.env.SKILL_EVAL_TEST_RUN_ID || null;
+    payload.dataDir = dataDir;
+    payload.resourceDir = resourceDir;
+  }
+  return payload;
 }
 
 function isExpectedHttpError(error) {
@@ -214,6 +335,59 @@ function safeDataArtifact(relativePath) {
   };
 }
 
+function resolvePublicDataFile(requestPath) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(requestPath);
+  } catch {
+    return { statusCode: 403, message: "Invalid data path" };
+  }
+
+  const normalized = decoded.replaceAll("\\", "/").replace(/^\/+/, "");
+  const productCheckOverlayMatch = normalized.match(
+    /^product-checks\/([^/]+)\/overlays\/([^/]+)-(source-mask|material-mask|hole-mask|result-match|diff-heatmap)\.png$/
+  );
+  if (productCheckOverlayMatch) {
+    const [, batchId, itemId] = productCheckOverlayMatch;
+    const item = getItemById(itemId);
+    if (!getBatchById(batchId, { includeArchived: true }) || !item || item.batch_id !== batchId) {
+      return { statusCode: 404, message: "File not found" };
+    }
+    const filePath = safeJoin(dataDir, normalized);
+    if (!filePath) {
+      return { statusCode: 403, message: "Invalid data path" };
+    }
+    return { filePath };
+  }
+
+  const match = normalized.match(/^cache\/([^/]+)\/([^/]+)\/(source|result)(\.[A-Za-z0-9]+)$/);
+  if (!match) {
+    return { statusCode: 404, message: "File not found" };
+  }
+
+  const [, batchId, itemId, kind, ext] = match;
+  if (!PUBLIC_CACHE_IMAGE_EXTENSIONS.has(ext.toLowerCase())) {
+    return { statusCode: 404, message: "File not found" };
+  }
+
+  const item = getItemById(itemId);
+  if (!item || item.batch_id !== batchId) {
+    return { statusCode: 404, message: "File not found" };
+  }
+
+  const expectedPath = kind === "source" ? item.source_image_path : item.result_image_path;
+  const expectedNormalized = String(expectedPath || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!expectedNormalized || expectedNormalized !== `data/${normalized}`) {
+    return { statusCode: 404, message: "File not found" };
+  }
+
+  const filePath = safeJoin(dataDir, normalized);
+  if (!filePath) {
+    return { statusCode: 403, message: "Invalid data path" };
+  }
+  return { filePath };
+}
+
 function artifactSize(filePath) {
   if (!existsSync(filePath)) return 0;
   const info = statSync(filePath);
@@ -270,8 +444,10 @@ function buildBatchDeletePlan(batchId) {
   };
 }
 
-function deleteBatchArtifacts(batchId) {
-  const plan = buildBatchDeletePlan(batchId);
+function deleteBatchArtifacts(planOrBatchId) {
+  const plan = typeof planOrBatchId === "string" ? buildBatchDeletePlan(planOrBatchId) : planOrBatchId;
+  const deletedArtifacts = [];
+  const failedArtifacts = [];
   for (const artifact of plan.artifacts) {
     if (!artifact.exists) continue;
     const safe = safeDataArtifact(artifact.path.replace(/^data[\\/]/, ""));
@@ -280,9 +456,19 @@ function deleteBatchArtifacts(batchId) {
       error.statusCode = 403;
       throw error;
     }
-    rmSync(safe.absolutePath, { recursive: true, force: true });
+    try {
+      rmSync(safe.absolutePath, { recursive: true, force: true });
+      deletedArtifacts.push({ path: artifact.path, bytes: artifact.bytes });
+    } catch (error) {
+      failedArtifacts.push({ path: artifact.path, error: sanitizeError(error) });
+    }
   }
-  return plan;
+  return {
+    ...plan,
+    artifactCleanup: failedArtifacts.length > 0 ? "partial_failed" : "succeeded",
+    deletedArtifacts,
+    failedArtifacts,
+  };
 }
 
 function ensureNoRunningBatchTask(batchId) {
@@ -293,9 +479,15 @@ function ensureNoRunningBatchTask(batchId) {
   }
 }
 
-function audit(event) {
+function audit(event, req = null) {
   try {
-    return recordAuditEvent(event);
+    return recordAuditEvent({
+      ...event,
+      payload: {
+        ...(event.payload || {}),
+        reviewer: event.payload?.reviewer ?? reviewerPayload(req),
+      },
+    });
   } catch (error) {
     console.error("audit event failed", error);
     return null;
@@ -540,7 +732,7 @@ function updateImportTaskFromProgress(taskId, event, counters) {
   updateTask(taskId, patch);
 }
 
-function startImportTask({ body, source = "resource" }) {
+function startImportTask({ body, source = "resource", reviewer = null }) {
   const sourceFile = source === "upload" ? body.fileName : body.file;
   const task = createTask("import", {
     sourceFile,
@@ -562,7 +754,7 @@ function startImportTask({ body, source = "resource" }) {
     eventType: "import.start",
     entityType: "task",
     entityId: task.id,
-    payload: auditImportPayload({ task, source, sourceFile }),
+    payload: { ...auditImportPayload({ task, source, sourceFile }), reviewer },
   });
   const counters = { failedSource: 0, failedResult: 0 };
 
@@ -611,7 +803,7 @@ function startImportTask({ body, source = "resource" }) {
         entityType: "batch",
         entityId: result.batch.id,
         batchId: result.batch.id,
-        payload: auditImportPayload({ task, source, sourceFile, result }),
+        payload: { ...auditImportPayload({ task, source, sourceFile, result }), reviewer },
       });
       logEvent("import", {
         event: "task-succeeded",
@@ -629,7 +821,7 @@ function startImportTask({ body, source = "resource" }) {
         eventType: "import.fail",
         entityType: "task",
         entityId: task.id,
-        payload: auditImportPayload({ task, source, sourceFile, error }),
+        payload: { ...auditImportPayload({ task, source, sourceFile, error }), reviewer },
       });
       logEvent("import", {
         event: "task-failed",
@@ -766,7 +958,7 @@ function forwardProductCheckOutput(batchId, stream, chunk) {
   }
 }
 
-async function startProductCheckRun(batchId) {
+async function startProductCheckRun(batchId, { reviewer = null } = {}) {
   if (productCheckJobs.has(batchId)) {
     return { statusCode: 409, status: await readProductCheckStatus(batchId) };
   }
@@ -806,7 +998,7 @@ async function startProductCheckRun(batchId) {
     entityType: "batch",
     entityId: batchId,
     batchId,
-    payload: { workers: productCheckWorkers },
+    payload: { workers: productCheckWorkers, reviewer },
   });
 
   const child = spawn(
@@ -860,7 +1052,7 @@ async function startProductCheckRun(batchId) {
       entityType: "batch",
       entityId: batchId,
       batchId,
-      payload: { error: error.message },
+      payload: { error: error.message, reviewer },
     });
     logEvent("product-check", { event: "failed", batchId, error: error.message });
   });
@@ -906,6 +1098,7 @@ async function startProductCheckRun(batchId) {
         exitCode: code,
         summary: next.summary || null,
         error,
+        reviewer,
       },
     });
     logEvent("product-check", {
@@ -921,8 +1114,38 @@ async function startProductCheckRun(batchId) {
 }
 
 async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/health") {
+    sendJson(res, 200, healthPayload());
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reviewer/me") {
+    sendJson(res, 200, { reviewer: getEffectiveReviewer(req) });
+    return;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/reviewer/me") {
+    try {
+      const body = await readBody(req);
+      sendJson(res, 200, { reviewer: saveReviewerConfig(body) });
+    } catch (error) {
+      if ([400, 409].includes(error?.statusCode)) {
+        sendError(res, error.statusCode, error.message);
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/batches") {
     sendJson(res, 200, { batches: getBatches({ includeArchived: url.searchParams.get("includeArchived") === "1" }) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/batches/by-digest") {
+    const digest = url.searchParams.get("digest") || "";
+    sendJson(res, 200, { batches: getBatchBySourceDigest(digest) });
     return;
   }
 
@@ -1000,7 +1223,7 @@ async function handleApi(req, res, url) {
       sourceFile: body.file || null,
       downloadImages: body.downloadImages !== false,
     });
-    const task = startImportTask({ body });
+    const task = startImportTask({ body, reviewer: reviewerPayload(req) });
     sendJson(res, 202, { task });
     return;
   }
@@ -1029,7 +1252,7 @@ async function handleApi(req, res, url) {
       sourceDir: "upload",
       downloadImages: body.downloadImages !== false,
     });
-    const task = startImportTask({ body, source: "upload" });
+    const task = startImportTask({ body, source: "upload", reviewer: reviewerPayload(req) });
     sendJson(res, 202, { task });
     return;
   }
@@ -1037,7 +1260,20 @@ async function handleApi(req, res, url) {
   const batchItemsMatch = url.pathname.match(/^\/api\/batches\/([^/]+)\/items$/);
   if (req.method === "GET" && batchItemsMatch) {
     const batchId = batchItemsMatch[1];
-    sendJson(res, 200, { items: getItemsForBatch(batchId) });
+    const filters = parseItemFilters(url.searchParams);
+    const productCheck = await readProductCheckBatch(batchId);
+    const productCheckByItemId = new Map((productCheck?.items || []).map((item) => [item.itemId, item]));
+    const allItems = getItemsForBatch(batchId);
+    const items = filterBatchItems(allItems, filters, productCheckByItemId);
+    sendJson(res, 200, {
+      items,
+      allItems,
+      filters,
+      summary: {
+        totalItems: allItems.length,
+        totalMatched: items.length,
+      },
+    });
     return;
   }
 
@@ -1070,7 +1306,7 @@ async function handleApi(req, res, url) {
       sendError(res, 404, "Batch not found");
       return;
     }
-    const run = await startProductCheckRun(batchId);
+    const run = await startProductCheckRun(batchId, { reviewer: reviewerPayload(req) });
     sendJson(res, run.statusCode, { run: run.status });
     return;
   }
@@ -1109,7 +1345,7 @@ async function handleApi(req, res, url) {
         reason: batch.archive_reason,
         noteLength: batch.archive_note?.length || 0,
       },
-    });
+    }, req);
     sendJson(res, 200, { batch, batches: getBatches({ includeArchived: true }) });
     return;
   }
@@ -1124,7 +1360,7 @@ async function handleApi(req, res, url) {
       entityId: batchId,
       batchId,
       payload: {},
-    });
+    }, req);
     sendJson(res, 200, { batch, batches: getBatches({ includeArchived: true }) });
     return;
   }
@@ -1145,7 +1381,7 @@ async function handleApi(req, res, url) {
         artifacts: plan.artifacts.length,
         totalBytes: plan.totalBytes,
       },
-    });
+    }, req);
     sendJson(res, 200, { plan });
     return;
   }
@@ -1159,21 +1395,44 @@ async function handleApi(req, res, url) {
       sendError(res, 400, "Batch delete requires confirmBatchId to match the batch id");
       return;
     }
-    const plan = deleteBatchArtifacts(batchId);
-    audit({
-      eventType: "batch.delete",
-      entityType: "batch",
-      entityId: batchId,
-      batchId,
-      payload: {
-        items: plan.items,
-        evaluations: plan.evaluations,
-        artifacts: plan.artifacts.length,
-        totalBytes: plan.totalBytes,
+    const plan = buildBatchDeletePlan(batchId);
+    const deletedRecord = deleteBatchRecord(batchId);
+    const cleanup = deleteBatchArtifacts(plan);
+    audit(
+      {
+        eventType: cleanup.failedArtifacts.length > 0 ? "batch.delete.partial" : "batch.delete",
+        entityType: "batch",
+        entityId: batchId,
+        batchId,
+        payload: {
+          items: deletedRecord.items,
+          evaluations: deletedRecord.evaluations,
+          annotations: deletedRecord.annotations,
+          artifacts: cleanup.artifacts.length,
+          deletedArtifacts: cleanup.deletedArtifacts.length,
+          failedArtifacts: cleanup.failedArtifacts.length,
+          artifactCleanup: cleanup.artifactCleanup,
+          totalBytes: cleanup.totalBytes,
+        },
       },
+      req
+    );
+    sendJson(res, cleanup.failedArtifacts.length > 0 ? 207 : 200, {
+      deleted: true,
+      artifactCleanup: cleanup.artifactCleanup,
+      plan: cleanup,
     });
-    deleteBatchRecord(batchId);
-    sendJson(res, 200, { deleted: true, plan });
+    return;
+  }
+
+  const itemAnnotationsMatch = url.pathname.match(/^\/api\/items\/([^/]+)\/annotations$/);
+  if (req.method === "GET" && itemAnnotationsMatch) {
+    const itemId = itemAnnotationsMatch[1];
+    if (!itemExists(itemId)) {
+      sendError(res, 404, "Item not found");
+      return;
+    }
+    sendJson(res, 200, { annotations: getAnnotationsForItem(itemId, { limit: url.searchParams.get("limit") || 100 }) });
     return;
   }
 
@@ -1187,7 +1446,8 @@ async function handleApi(req, res, url) {
 
     const body = await readBody(req);
     try {
-      const evaluation = saveEvaluation(itemId, body);
+      const reviewer = getEffectiveReviewer(req);
+      const evaluation = saveEvaluation(itemId, { ...body, reviewer });
       sendJson(res, 200, { evaluation });
     } catch (error) {
       if (error instanceof EvaluationValidationError) {
@@ -1217,7 +1477,7 @@ async function handleApi(req, res, url) {
               noteLength: item.exclude_note?.length || 0,
             }
           : {},
-      });
+      }, req);
       sendJson(res, 200, { item, stats: getBatchStats(item.batch_id) });
     } catch (error) {
       if ([400, 404].includes(error?.statusCode)) {
@@ -1272,7 +1532,7 @@ async function handleApi(req, res, url) {
           fetchStatus: retry.fetchStatus,
           bytes: buffer.length,
         },
-      });
+      }, req);
       sendJson(res, 200, { retry });
     } catch (error) {
       if ([400, 404, 413].includes(error?.statusCode)) {
@@ -1297,12 +1557,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname.startsWith("/data/")) {
-      const filePath = safeJoin(dataDir, url.pathname.slice("/data/".length));
-      if (!filePath) {
-        sendError(res, 403, "Invalid data path");
+      const resolved = resolvePublicDataFile(url.pathname.slice("/data/".length));
+      if (!resolved.filePath) {
+        sendError(res, resolved.statusCode || 404, resolved.message || "File not found");
         return;
       }
-      streamFile(res, filePath);
+      streamFile(res, resolved.filePath);
       return;
     }
 

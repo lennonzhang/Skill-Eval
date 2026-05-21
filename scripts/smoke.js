@@ -1,4 +1,8 @@
 const baseUrl = process.env.SMOKE_BASE_URL || "http://127.0.0.1:4173";
+const onePixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+  "base64"
+);
 
 async function getJson(path) {
   const response = await fetch(`${baseUrl}${path}`);
@@ -21,6 +25,16 @@ async function postJson(path, body) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
+async function postBinary(path, body, contentType) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body,
   });
   const payload = await response.json().catch(() => ({}));
   return { response, payload };
@@ -64,6 +78,11 @@ if (!html.includes("Skill Eval Review")) {
 }
 if (!html.includes("taskProgressStrip")) {
   throw new Error("Review page did not include the task progress strip");
+}
+
+const reviewerResponse = await getJson("/api/reviewer/me");
+if (!reviewerResponse.reviewer || !("source" in reviewerResponse.reviewer)) {
+  throw new Error("Reviewer API did not return the effective reviewer");
 }
 
 const missingTask = await fetch(`${baseUrl}/api/tasks/not-a-real-task`);
@@ -158,6 +177,12 @@ if (validUploadPreflight.response.status !== 200 || validUploadPreflight.payload
 if (!validUploadPreflight.payload.preflight.sourceDigest?.startsWith("sha256:")) {
   throw new Error("Valid upload preflight did not return a source digest");
 }
+if (!validUploadPreflight.payload.preflight.contentDigest?.startsWith("sha256:")) {
+  throw new Error("Valid upload preflight did not return a content digest");
+}
+if (validUploadPreflight.payload.preflight.importSchemaVersion !== "1") {
+  throw new Error("Valid upload preflight did not return the import schema version");
+}
 const digestMismatchUpload = await postJson("/api/import/upload", {
   fileName: uploadFileName,
   content: uploadContent,
@@ -188,10 +213,36 @@ const uploadedItemsBody = await getJson(`/api/batches/${uploadedTask.batchId}/it
 if (uploadedItemsBody.items.length !== 1 || uploadedItemsBody.items[0].raw_json_file !== uploadFileName) {
   throw new Error("Uploaded batch items did not match the uploaded JSON");
 }
+const uploadedItem = uploadedItemsBody.items[0];
+const browserCacheResponse = await postBinary(
+  `/api/items/${uploadedItem.id}/images/source/browser-cache`,
+  onePixelPng,
+  "image/png"
+);
+if (browserCacheResponse.response.status !== 200 || !browserCacheResponse.payload.retry?.imageUrl) {
+  throw new Error(`Browser-cache upload returned HTTP ${browserCacheResponse.response.status}, expected cached image`);
+}
+const cachedUploadImage = await fetch(`${baseUrl}${browserCacheResponse.payload.retry.imageUrl}`);
+if (!cachedUploadImage.ok || !String(cachedUploadImage.headers.get("content-type") || "").startsWith("image/png")) {
+  throw new Error(`Cached browser image returned HTTP ${cachedUploadImage.status}, expected image/png`);
+}
 const uploadedBatchBody = await getJson("/api/batches");
 const uploadedBatch = uploadedBatchBody.batches.find((candidate) => candidate.id === uploadedTask.batchId);
 if (uploadedBatch?.source_dir !== "upload" || uploadedBatch?.source_file !== uploadFileName) {
   throw new Error("Uploaded batch did not record upload source metadata");
+}
+if (uploadedBatch.source_sha256 !== validUploadPreflight.payload.preflight.sourceDigest) {
+  throw new Error("Uploaded batch did not record the source digest");
+}
+if (uploadedBatch.content_sha256 !== validUploadPreflight.payload.preflight.contentDigest) {
+  throw new Error("Uploaded batch did not record the content digest");
+}
+if (uploadedBatch.import_schema_version !== "1") {
+  throw new Error("Uploaded batch did not record the import schema version");
+}
+const digestLookup = await getJson(`/api/batches/by-digest?digest=${encodeURIComponent(uploadedBatch.source_sha256)}`);
+if (!digestLookup.batches.some((candidate) => candidate.id === uploadedTask.batchId)) {
+  throw new Error("Digest lookup did not find the uploaded batch");
 }
 batches = uploadedBatchBody.batches;
 let auditEvents = await getJson(`/api/audit-events?batchId=${encodeURIComponent(uploadedTask.batchId)}&limit=10`);
@@ -332,6 +383,30 @@ if (invalidEvaluation.response.status !== 400) {
   throw new Error(`Invalid evaluation returned HTTP ${invalidEvaluation.response.status}, expected 400`);
 }
 
+const evaluationTarget = items[0];
+const validEvaluation = await postJson(`/api/items/${evaluationTarget.id}/evaluation`, {
+  product_preservation_score: 5,
+  instruction_adherence_score: 4,
+  integration_grounding_score: 3,
+  prompt_optimization_value_score: 2,
+  commercial_quality_score: 1,
+  technical_safety_score: 5,
+  status: "reviewed",
+  tags: ["excellent"],
+  comment: "smoke evaluation save",
+});
+if (validEvaluation.response.status !== 200 || !validEvaluation.payload.evaluation?.annotationId) {
+  throw new Error(`Valid evaluation returned HTTP ${validEvaluation.response.status}, expected saved annotation`);
+}
+const annotationsBody = await getJson(`/api/items/${evaluationTarget.id}/annotations`);
+if (!annotationsBody.annotations.some((annotation) => annotation.id === validEvaluation.payload.evaluation.annotationId)) {
+  throw new Error("Annotations API did not include the saved evaluation annotation");
+}
+const evaluationAudit = await getJson(`/api/audit-events?itemId=${encodeURIComponent(evaluationTarget.id)}&limit=10`);
+if (!evaluationAudit.events.some((event) => event.eventType === "evaluation.save" && event.payload.annotationId === validEvaluation.payload.evaluation.annotationId)) {
+  throw new Error("Audit log did not record evaluation.save for saved annotation");
+}
+
 if (activeItems.length > 0) {
   const exclusionTarget = activeItems[0];
   const statsBeforeExclusion = await getJson(`/api/batches/${batch.id}/stats`);
@@ -348,7 +423,7 @@ if (activeItems.length > 0) {
 
     const excludeResponse = await patchJson(`/api/items/${exclusionTarget.id}/exclusion`, {
       excluded: true,
-      reason: "not_evaluable",
+      reason: "internal_test",
       note: "smoke temporary exclusion",
     });
     if (excludeResponse.response.status !== 200 || !excludeResponse.payload.item?.is_excluded) {
@@ -410,6 +485,14 @@ if (missingItem.response.status !== 404) {
 const traversalResponse = await fetch(`${baseUrl}/data/..%2Fserver.js`);
 if (![403, 404].includes(traversalResponse.status)) {
   throw new Error(`Traversal probe returned HTTP ${traversalResponse.status}, expected 403 or 404`);
+}
+
+const privateDataPaths = ["/data/app.sqlite", "/data/reviewer.json", "/data/reports/not-public.json"];
+for (const privatePath of privateDataPaths) {
+  const privateResponse = await fetch(`${baseUrl}${privatePath}`);
+  if (![403, 404].includes(privateResponse.status)) {
+    throw new Error(`Private data path ${privatePath} returned HTTP ${privateResponse.status}, expected 403 or 404`);
+  }
 }
 
 const firstCachedImage = items

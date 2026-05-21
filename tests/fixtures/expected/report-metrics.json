@@ -1,0 +1,35 @@
+{
+  "items": 2,
+  "reviewed": 2,
+  "annotations": 2,
+  "models": {
+    "fixture-model-a": {
+      "reviewed": 1,
+      "overallMean": 4.7,
+      "dimensions": {
+        "product_preservation": 5,
+        "instruction_adherence": 5,
+        "integration_grounding": 4,
+        "prompt_optimization_value": 4,
+        "commercial_quality": 5,
+        "technical_safety": 5
+      }
+    },
+    "fixture-model-b": {
+      "reviewed": 1,
+      "overallMean": 2.5,
+      "dimensions": {
+        "product_preservation": 2,
+        "instruction_adherence": 3,
+        "integration_grounding": 2,
+        "prompt_optimization_value": 3,
+        "commercial_quality": 2,
+        "technical_safety": 4
+      }
+    }
+  },
+  "tags": {
+    "excellent": 1,
+    "product_changed": 1
+  }
+}

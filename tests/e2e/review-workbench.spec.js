@@ -58,6 +58,13 @@ async function deleteBatch(request, batchId) {
   });
 }
 
+async function openReviewPage(page, url) {
+  await page.addInitScript(() => {
+    localStorage.setItem("skillEvalReviewer.v1", JSON.stringify({ id: "e2e-reviewer", name: "E2E Reviewer" }));
+  });
+  await page.goto(url);
+}
+
 test.describe("review workbench", () => {
   test("restores URL state, virtualizes the queue, and jumps back to the selected item", async ({ page, request }) => {
     const { batchId, items } = await createUploadedBatch(request, {
@@ -66,7 +73,7 @@ test.describe("review workbench", () => {
     });
     try {
       const target = items[79];
-      await page.goto(`/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(target.id)}&status=all&lang=zh`);
+      await openReviewPage(page, `/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(target.id)}&status=all&lang=zh`);
 
       await expect(page.locator("#languageSelect")).toHaveValue("zh");
       await expect(page.locator("#batchSelect")).toHaveValue(batchId);
@@ -88,8 +95,21 @@ test.describe("review workbench", () => {
 
       await page.locator("#scrollCurrentItemButton").click();
       await expect(page.locator(`.item-row.active[data-id="${target.id}"]`)).toBeVisible();
+      await page.locator("#itemList").evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await page.waitForFunction(
+        (id) => document.querySelector(".item-row")?.getAttribute("data-id") === id,
+        items[0].id
+      );
+      const firstVisibleId = items[0].id;
+      await page.locator(".item-row").first().click();
+      await expect(page.locator("#itemList .item-row")).not.toHaveCount(0);
+      await expect(page.locator(`.item-row.active[data-id="${firstVisibleId}"]`)).toBeVisible();
+      await expect(page.locator("#reviewPane")).toContainText(firstVisibleId);
       await expect(page).toHaveURL(new RegExp(`batch=${encodeURIComponent(batchId)}`));
-      await expect(page).toHaveURL(new RegExp(`item=${encodeURIComponent(target.id)}`));
+      await expect(page).toHaveURL(new RegExp(`item=${encodeURIComponent(firstVisibleId)}`));
     } finally {
       await deleteBatch(request, batchId);
     }
@@ -103,10 +123,10 @@ test.describe("review workbench", () => {
     try {
       const first = items[0];
       const second = items[1];
-      await page.goto(`/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(first.id)}&status=all`);
+      await openReviewPage(page, `/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(first.id)}&status=all`);
       await expect(page.locator("#reviewPane")).toContainText(first.id);
 
-      await page.locator('#excludeForm select[name="reason"]').selectOption("not_evaluable");
+      await expect(page.locator('#excludeForm select[name="reason"]')).toHaveValue("internal_test");
       await page.locator('#excludeForm button[type="submit"]').click();
 
       await expect(page.locator("#reviewPane")).toContainText(second.id);
@@ -125,6 +145,77 @@ test.describe("review workbench", () => {
     }
   });
 
+  test("stores browser reviewer identity and attributes saved reviews", async ({ page, request }) => {
+    const { batchId, items } = await createUploadedBatch(request, {
+      count: 1,
+      prefix: "e2e-reviewer-identity",
+    });
+    try {
+      await page.goto(`/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(items[0].id)}&status=all&lang=en`);
+      await expect(page.locator("#reviewerDialog")).toBeVisible();
+      await page.locator("#reviewerIdInput").fill("browser-e2e");
+      await page.locator("#reviewerNameInput").fill("Browser E2E");
+      await page.locator("#reviewerSaveButton").click();
+      await expect(page.locator("#reviewerDialog")).not.toBeVisible();
+      await expect(page.locator("#reviewerChip")).toContainText("Browser E2E");
+
+      await page.locator("#saveButton").click();
+      await expect(page.locator("#reviewPane")).toContainText("Browser E2E (browser-e2e)");
+
+      const annotationsResponse = await request.get(`/api/items/${encodeURIComponent(items[0].id)}/annotations`);
+      expect(annotationsResponse.status()).toBe(200);
+      const annotationsBody = await annotationsResponse.json();
+      expect(annotationsBody.annotations[0].reviewerId).toBe("browser-e2e");
+      expect(annotationsBody.annotations[0].reviewerName).toBe("Browser E2E");
+    } finally {
+      await deleteBatch(request, batchId);
+    }
+  });
+
+  test("supports compound filters and keyboard review shortcuts", async ({ page, request }) => {
+    const { batchId, items } = await createUploadedBatch(request, {
+      count: 4,
+      prefix: "e2e-filter-keyboard",
+    });
+    try {
+      await openReviewPage(page, `/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(items[0].id)}&status=all&lang=en`);
+      await expect(page.locator("#reviewPane")).toContainText(items[0].id);
+
+      await page.keyboard.press("?");
+      await expect(page.locator("#shortcutDialog")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.locator("#shortcutDialog")).not.toBeVisible();
+
+      await page.keyboard.press("5");
+      await expect(page.locator('[data-score-value="product_preservation_score"]')).toHaveText("5");
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("4");
+      await expect(page.locator('[data-score-value="instruction_adherence_score"]')).toHaveText("4");
+      await page.keyboard.press("N");
+      await expect(page.locator("#statusSelect")).toHaveValue("needs_recheck");
+      await page.keyboard.press("Control+Enter");
+      await expect(page.locator("#saveNote")).toContainText("Saved");
+
+      await page.locator("#advancedFilterButton").click();
+      await page.locator("#scoreMaxFilter").fill("4");
+      await page.locator("#scoreMaxFilter").blur();
+      await page.locator('[data-filter-tag="product_changed"][data-filter-side="include"]').click();
+      await expect(page.locator('.filter-chip[data-filter-chip="tagIncludes"]')).toContainText("product_changed");
+
+      await page.locator("#resetFiltersButton").click();
+      await expect(page.locator(".filter-chip")).toHaveCount(0);
+
+      await page.locator("#commentInput").focus();
+      await page.keyboard.press("J");
+      await expect(page.locator("#reviewPane")).toContainText(items[0].id);
+      await page.locator("#commentInput").blur();
+      await page.keyboard.press("J");
+      await expect(page.locator("#reviewPane")).toContainText(items[1].id);
+    } finally {
+      await deleteBatch(request, batchId);
+    }
+  });
+
   test("keeps the review workbench layout stable @visual", async ({ page, request }, testInfo) => {
     const { batchId, items } = await createUploadedBatch(request, {
       count: 16,
@@ -132,7 +223,7 @@ test.describe("review workbench", () => {
     });
     try {
       await page.setViewportSize({ width: 1440, height: 900 });
-      await page.goto(`/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(items[0].id)}&status=all&lang=en`);
+      await openReviewPage(page, `/?batch=${encodeURIComponent(batchId)}&item=${encodeURIComponent(items[0].id)}&status=all&lang=en`);
 
       await expect(page.locator("#reviewPane")).toContainText(items[0].id);
       const bodyOverflowX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

@@ -1,23 +1,28 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import { importResourceBatch, importUploadedJsonBatch, preflightUploadedJson } from "../src/importer.js";
+import { reportsDir } from "../src/paths.js";
 import {
   archiveBatch,
   createBatch,
   deleteBatchRecord,
   getBatchById,
   getBatchDeleteCounts,
+  getBatchBySourceDigest,
   getBatchStats,
   getBatches,
   getDatabase,
   getAuditEvents,
+  getAnnotationsForItem,
   getItemsForBatch,
   insertItem,
+  migrateEvaluationSchema,
   recordAuditEvent,
   restoreBatch,
   saveEvaluation,
@@ -188,14 +193,48 @@ try {
     status: "reviewed",
     tags: ["excellent"],
     comment: "rollback selftest",
+    reviewer: { id: "selftest-reviewer", name: "Selftest Reviewer" },
   });
 
   assert.equal(evaluation.overall_score, 3.45);
   assert.deepEqual(evaluation.tags, ["excellent"]);
+  assert.equal(evaluation.reviewer_id, "selftest-reviewer");
+  assert.equal(evaluation.reviewer_name, "Selftest Reviewer");
+  assert.ok(evaluation.annotationId);
+
+  const annotations = getAnnotationsForItem(testItemId);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].id, evaluation.annotationId);
+  assert.equal(annotations[0].reviewerId, "selftest-reviewer");
+  assert.equal(annotations[0].scores.product_preservation_score, 5);
+  assert.deepEqual(annotations[0].tags, ["excellent"]);
+
+  const updatedEvaluation = saveEvaluation(testItemId, {
+    product_preservation_score: 4,
+    instruction_adherence_score: 4,
+    integration_grounding_score: 4,
+    prompt_optimization_value_score: 4,
+    commercial_quality_score: 4,
+    technical_safety_score: 4,
+    status: "reviewed",
+    tags: ["artifact"],
+    comment: "rollback selftest update",
+    reviewer: { id: "second-reviewer", name: "Second Reviewer" },
+  });
+  assert.equal(updatedEvaluation.overall_score, 4);
+  assert.equal(updatedEvaluation.reviewer_id, "second-reviewer");
+  const annotationHistory = getAnnotationsForItem(testItemId);
+  assert.equal(annotationHistory.length, 2);
+  assert.equal(annotationHistory[0].id, updatedEvaluation.annotationId);
+  assert.equal(annotationHistory[0].reviewerId, "second-reviewer");
+  assert.equal(annotationHistory[1].id, evaluation.annotationId);
+  const latestItem = getItemsForBatch(testBatchId).find((item) => item.id === testItemId);
+  assert.equal(latestItem.overall_score, 4);
+  assert.equal(latestItem.reviewer_id, "second-reviewer");
 
   testStats = getBatchStats(testBatchId).summary;
   assert.equal(testStats.reviewed_items, 1);
-  assert.deepEqual(getBatchDeleteCounts(testBatchId), { items: 2, evaluations: 1 });
+  assert.deepEqual(getBatchDeleteCounts(testBatchId), { items: 2, evaluations: 1, annotations: 2 });
 
   updateSingleImageCacheStatus(testItemId, "source", {
     imagePath: "data/cache/selftest/source.png",
@@ -245,15 +284,15 @@ try {
   let byModel = getBatchStats(testBatchId).by_model[0];
   assert.equal(byModel.total_items, 2);
   assert.equal(byModel.reviewed_items, 1);
-  assert.deepEqual(getBatchStats(testBatchId).tag_counts, [{ tag: "excellent", count: 1 }]);
+  assert.deepEqual(getBatchStats(testBatchId).tag_counts, [{ tag: "artifact", count: 1 }]);
 
   const excludedItem = setItemExclusion(testItemId, {
     excluded: true,
-    reason: "not_evaluable",
+    reason: "internal_test",
     note: "exclude from selftest stats",
   });
   assert.equal(excludedItem.is_excluded, 1);
-  assert.equal(excludedItem.exclude_reason, "not_evaluable");
+  assert.equal(excludedItem.exclude_reason, "internal_test");
   assert.equal(excludedItem.exclude_note, "exclude from selftest stats");
 
   const orderedItems = getItemsForBatch(testBatchId);
@@ -300,6 +339,35 @@ try {
   assert.equal(testStats.excluded_items, 0);
   assert.equal(testStats.reviewed_items, 1);
 
+  const reportPath = path.join(reportsDir, `selftest-report-${randomUUID()}.json`);
+  const sanitizedReport = {
+    schemaVersion: "1",
+    generatedAt: now,
+    sanitized: true,
+    batch: {
+      id: testBatchId,
+      sourceSha256: "sha256:selftest",
+      contentSha256: "sha256:selftest-content",
+    },
+    summary: getBatchStats(testBatchId).summary,
+    evaluations: getItemsForBatch(testBatchId).map((item) => ({
+      itemId: item.id,
+      rawJsonFile: item.raw_json_file,
+      rawIndex: item.raw_index,
+      model: item.model,
+      overallScore: item.overall_score ?? null,
+      tags: Array.isArray(item.tags) ? item.tags : [],
+    })),
+    excludedFields: ["text", "url", "resultUrl", "optimizationPrompt", "comment", "sourceImagePath", "resultImagePath"],
+  };
+  mkdirSync(reportsDir, { recursive: true });
+  writeFileSync(reportPath, `${JSON.stringify(sanitizedReport, null, 2)}\n`, "utf8");
+  const reportText = readFileSync(reportPath, "utf8");
+  assert.equal(reportText.includes("selftest source prompt"), false);
+  assert.equal(reportText.includes("https://example.test/source.png"), false);
+  assert.equal(reportText.includes("rollback selftest"), false);
+  unlinkSync(reportPath);
+
   const auditEvent = recordAuditEvent({
     eventType: "selftest.event",
     entityType: "batch",
@@ -311,10 +379,14 @@ try {
   assert.equal(auditEvent.eventType, "selftest.event");
   assert.equal(auditEvent.payload.count, 1);
   const auditEvents = getAuditEvents({ batchId: testBatchId, limit: 5 });
-  assert.equal(auditEvents.length, 1);
-  assert.equal(auditEvents[0].eventType, "selftest.event");
-  assert.equal(auditEvents[0].itemId, testItemId);
-  assert.deepEqual(auditEvents[0].payload, { count: 1, note: "rollback-safe audit" });
+  const selftestAuditEvent = auditEvents.find((event) => event.eventType === "selftest.event");
+  assert.ok(selftestAuditEvent);
+  assert.equal(selftestAuditEvent.itemId, testItemId);
+  assert.deepEqual(selftestAuditEvent.payload, { count: 1, note: "rollback-safe audit" });
+  const evaluationAuditEvents = auditEvents.filter((event) => event.eventType === "evaluation.save");
+  assert.equal(evaluationAuditEvents.length, 2);
+  assert.ok(evaluationAuditEvents.some((event) => event.payload.commentLength === "rollback selftest".length));
+  assert.ok(evaluationAuditEvents.some((event) => event.payload.commentLength === "rollback selftest update".length));
 } finally {
   db.exec("ROLLBACK");
 }
@@ -367,6 +439,80 @@ assert.throws(
   EvaluationValidationError
 );
 
+const migrationDb = new DatabaseSync(":memory:");
+migrationDb.exec(`
+  CREATE TABLE evaluations (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL UNIQUE,
+    product_preservation_score INTEGER NOT NULL,
+    instruction_adherence_score INTEGER NOT NULL,
+    integration_grounding_score INTEGER NOT NULL,
+    prompt_optimization_value_score INTEGER NOT NULL,
+    commercial_quality_score INTEGER NOT NULL,
+    technical_safety_score INTEGER NOT NULL,
+    overall_score REAL NOT NULL,
+    status TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    comment TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO evaluations (
+    id,
+    item_id,
+    product_preservation_score,
+    instruction_adherence_score,
+    integration_grounding_score,
+    prompt_optimization_value_score,
+    commercial_quality_score,
+    technical_safety_score,
+    overall_score,
+    status,
+    tags,
+    comment,
+    created_at,
+    updated_at
+  ) VALUES (
+    'legacy-eval',
+    'legacy-item',
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    'reviewed',
+    '["excellent"]',
+    'keep me',
+    '2026-01-01T00:00:00.000Z',
+    '2026-01-01T00:00:00.000Z'
+  );
+`);
+migrateEvaluationSchema(migrationDb);
+const migratedColumns = migrationDb.prepare("PRAGMA table_info(evaluations)").all().map((column) => column.name);
+assert.ok(migratedColumns.includes("reviewer_id"));
+assert.ok(migratedColumns.includes("reviewer_name"));
+const migratedEvaluation = migrationDb.prepare("SELECT id, comment FROM evaluations").get();
+assert.equal(migratedEvaluation.id, "legacy-eval");
+assert.equal(migratedEvaluation.comment, "keep me");
+migrationDb.close();
+
+const unsafeMigrationDb = new DatabaseSync(":memory:");
+unsafeMigrationDb.exec(`
+  CREATE TABLE evaluations (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL
+  );
+  INSERT INTO evaluations (id, item_id, status) VALUES ('unsafe-eval', 'unsafe-item', 'reviewed');
+`);
+assert.throws(() => migrateEvaluationSchema(unsafeMigrationDb), /Unsafe evaluations schema migration refused/);
+const unsafeEvaluation = unsafeMigrationDb.prepare("SELECT id, status FROM evaluations").get();
+assert.equal(unsafeEvaluation.id, "unsafe-eval");
+assert.equal(unsafeEvaluation.status, "reviewed");
+unsafeMigrationDb.close();
+
 const afterRollback = getBatchStats(testBatchId).summary;
 assert.equal(afterRollback.total_items, 0);
 assert.equal(afterRollback.reviewed_items, 0);
@@ -414,7 +560,7 @@ try {
     tags: ["excellent"],
     comment: "delete selftest",
   });
-  assert.deepEqual(getBatchDeleteCounts(deleteBatchId), { items: 1, evaluations: 1 });
+  assert.deepEqual(getBatchDeleteCounts(deleteBatchId), { items: 1, evaluations: 1, annotations: 1 });
   deleteBatchRecord(deleteBatchId);
   assert.equal(getBatchById(deleteBatchId, { includeArchived: true }), null);
   assert.equal(getItemsForBatch(deleteBatchId).length, 0);
@@ -494,6 +640,8 @@ try {
   assert.equal(uploadPreflight.validRecords, 1);
   assert.equal(uploadPreflight.invalidRecords, 0);
   assert.ok(uploadPreflight.sourceDigest.startsWith("sha256:"));
+  assert.ok(uploadPreflight.contentDigest.startsWith("sha256:"));
+  assert.equal(uploadPreflight.importSchemaVersion, "1");
 
   const uploadResult = await importUploadedJsonBatch({
     fileName: "selftest-upload.json",
@@ -503,6 +651,11 @@ try {
   });
   assert.equal(uploadResult.batch.sourceDir, "upload");
   assert.equal(uploadResult.batch.sourceFile, "selftest-upload.json");
+  assert.equal(uploadResult.batch.sourceSha256, uploadPreflight.sourceDigest);
+  assert.equal(uploadResult.batch.sourceSizeBytes, Buffer.byteLength(uploadContent, "utf8"));
+  assert.equal(uploadResult.batch.contentSha256, uploadPreflight.contentDigest);
+  assert.equal(uploadResult.batch.importSchemaVersion, "1");
+  assert.equal(getBatchBySourceDigest(uploadPreflight.sourceDigest).some((batch) => batch.id === uploadResult.batch.id), true);
   assert.equal(uploadResult.parsed, 1);
   assert.equal(uploadResult.inserted, 1);
   const uploadedItem = getItemsForBatch(uploadResult.batch.id)[0];

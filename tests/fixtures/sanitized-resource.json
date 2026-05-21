@@ -1,0 +1,20 @@
+[
+  {
+    "model": "fixture-model-a",
+    "text": "sanitized source prompt for a red product on a clean tabletop",
+    "url": "https://example.test/fixture-source-a.png",
+    "optimizationPrompt": "sanitized optimized prompt preserving the product while improving scene grounding",
+    "resultUrl": "https://example.test/fixture-result-a.png"
+  },
+  {
+    "provider": "fixture-model-b",
+    "params": {
+      "content": [
+        { "text": "sanitized source prompt for a blue product on a neutral shelf" },
+        { "url": "https://example.test/fixture-source-b.png" }
+      ]
+    },
+    "optimizationPrompt": "sanitized optimized prompt preserving identity and improving commercial composition",
+    "resultUrl": "https://example.test/fixture-result-b.png"
+  }
+]

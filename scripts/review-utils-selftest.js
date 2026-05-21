@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 
 import {
   ITEM_ROW_HEIGHT,
+  hasAdvancedReviewFilters,
   normalizeTaskCard,
+  normalizeReviewFilters,
   readReviewUrlState,
+  reviewItemQueryParamsFromFilters,
   reviewUrlParamsFromState,
   targetScrollTopForIndex,
   taskProgressPercent,
@@ -45,14 +48,26 @@ assert.equal(
 assert.equal(targetScrollTopForIndex({ index: -1, total: 0, viewportHeight: 100 }), 0);
 
 const urlState = readReviewUrlState(
-  "?batch=batch-1&item=item-2&model=gemini&status=excluded&q=shoe&lang=zh&archived=1"
+  "?batch=batch-1&item=item-2&model=gemini&status=needs_recheck&q=shoe&scoreMax=2.5&tagIncludes=product_changed,artifact&tagExcludes=excellent&reviewer=alice&pcDelta=2&cache=failed&lang=zh&archived=1"
 );
 assert.deepEqual(urlState, {
   batchId: "batch-1",
   itemId: "item-2",
   model: "gemini",
-  status: "excluded",
+  status: "needs_recheck",
   search: "shoe",
+  filters: {
+    model: "gemini",
+    status: "needs_recheck",
+    search: "shoe",
+    scoreMin: "",
+    scoreMax: "2.5",
+    tagIncludes: ["product_changed", "artifact"],
+    tagExcludes: ["excellent"],
+    reviewer: "alice",
+    productCheckDeltaMin: "2",
+    cacheStatus: "failed",
+  },
   language: "zh",
   includeArchived: true,
 });
@@ -60,11 +75,43 @@ assert.deepEqual(urlState, {
 const params = reviewUrlParamsFromState({
   selectedBatchId: "batch-1",
   selectedItemId: "item-2",
-  filters: { model: "gemini", status: "excluded", search: "shoe" },
+  filters: {
+    model: "gemini",
+    status: "needs_recheck",
+    search: "shoe",
+    scoreMax: "2.5",
+    tagIncludes: ["product_changed", "artifact"],
+    tagExcludes: ["excellent"],
+    reviewer: "alice",
+    productCheckDeltaMin: "2",
+    cacheStatus: "failed",
+  },
   language: "zh",
   showArchivedBatches: true,
 });
-assert.equal(params.toString(), "batch=batch-1&item=item-2&model=gemini&status=excluded&q=shoe&lang=zh&archived=1");
+assert.equal(
+  params.toString(),
+  "batch=batch-1&item=item-2&model=gemini&status=needs_recheck&q=shoe&scoreMax=2.5&tagIncludes=product_changed%2Cartifact&tagExcludes=excellent&reviewer=alice&pcDelta=2&cache=failed&lang=zh&archived=1"
+);
+
+assert.deepEqual(normalizeReviewFilters({ status: "bad", cacheStatus: "nope", scoreMin: "x", tagIncludes: "a,b" }), {
+  model: "all",
+  status: "all",
+  search: "",
+  scoreMin: "",
+  scoreMax: "",
+  tagIncludes: ["a", "b"],
+  tagExcludes: [],
+  reviewer: "",
+  productCheckDeltaMin: "",
+  cacheStatus: "all",
+});
+assert.equal(hasAdvancedReviewFilters({ tagIncludes: ["product_changed"] }), true);
+assert.equal(hasAdvancedReviewFilters({ model: "gemini", status: "reviewed" }), false);
+assert.equal(
+  reviewItemQueryParamsFromFilters({ scoreMax: "2.5", tagIncludes: ["product_changed"], cacheStatus: "failed" }).toString(),
+  "scoreMax=2.5&tagIncludes=product_changed&cacheStatus=failed"
+);
 
 const normalizedRunningTask = normalizeTaskCard({
   type: "product-check",

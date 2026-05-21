@@ -80,7 +80,68 @@ Before making code changes, inspect the current files and preserve unrelated use
 
 When validation commands exist, run the smallest relevant checks first, then broader build or test commands if runtime code changed. Report any commands that could not be run.
 
-Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for the review server, `pnpm run check` for syntax validation, `pnpm run clear:evaluations -- --yes` for explicitly deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for read-only API/page validation against a running local server. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
+Use `pnpm run import:resource` for local JSON import, `pnpm run dev` for one-off local server runs, `pnpm run serve` for stable service semantics, `pnpm run check` for syntax validation, `pnpm run clear:evaluations -- --yes` for explicitly deleting local review records, `pnpm run selftest` for rollback-safe database scoring validation, and `pnpm run smoke` for writable API/page validation against an isolated test server. Use `pnpm run smoke:readonly` for the real shared service. Do not use `pnpm import`; that is a pnpm built-in command, not this project's data-import script.
+
+## Local Service Workflow
+
+The shared review service is the real environment:
+
+```text
+PORT=4173
+HOST=127.0.0.1
+SKILL_EVAL_DATA_DIR=data
+```
+
+LAN exposure for the shared service must be explicit:
+
+```bash
+pnpm run service:start -- -BindHost 0.0.0.0
+```
+
+Manage it with:
+
+```bash
+pnpm run service:start
+pnpm run service:status
+pnpm run service:restart
+pnpm run service:stop
+```
+
+The test environment is isolated from real review data:
+
+```text
+PORT=4174
+HOST=127.0.0.1
+SKILL_EVAL_DATA_DIR=.tmp/test-env-data
+```
+
+Prepare it from the local Gemini sample resource files:
+
+```bash
+pnpm run test-env:reset
+pnpm run test-env:start
+```
+
+`test-env:reset` imports `resource/gemini_tasks_20260516-20260517.json` and `resource/Gemini_tasks_20260518-20260519.json` into `.tmp/test-env-data/` without downloading images. These are local input data and must remain uncommitted. Use `pnpm run test-env:reset:full` only when the task explicitly needs image cache or visual validation.
+
+For normal code changes, validate in this order:
+
+```bash
+pnpm run check
+pnpm run selftest
+pnpm run test-env:smoke
+```
+
+Only after those pass should you restart the shared service:
+
+```bash
+pnpm run service:restart
+pnpm run smoke:readonly
+```
+
+Do not run the writable `pnpm run smoke` against the real shared service on `4173`; it creates and deletes temporary batches. Do not restart `4173` repeatedly while iterating on code. Use `4174` for development and reserve `service:restart` for the final handoff.
+
+The shared service writes its current logs to `data/logs/server.log` and `data/logs/server.err.log`; rotated logs are kept under `data/logs/archive/`. The service identity lives at `data/service.pid.json`. If the identity file and port owner disagree, report the status and do not force-stop an unknown process.
 
 ## Worktree Rules
 
@@ -114,7 +175,7 @@ In this Windows sandbox, plain shell tool calls may fail with `windows sandbox: 
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command "..."
 ```
 
-Avoid ad hoc PowerShell API checks when a project script exists. Use `pnpm run smoke` instead of hand-building `Invoke-RestMethod` calls for batch items or stats. Treat nested PowerShell quoting as fragile: `$variables`, `$()` expressions, format strings, and arguments with spaces can be expanded or split before PowerShell receives them.
+Avoid ad hoc PowerShell API checks when a project script exists. Use `pnpm run test-env:smoke` for writable isolated validation and `pnpm run smoke:readonly` for the real shared service instead of hand-building `Invoke-RestMethod` calls for batch items or stats. Treat nested PowerShell quoting as fragile: `$variables`, `$()` expressions, format strings, and arguments with spaces can be expanded or split before PowerShell receives them.
 
 Keep `powershell.exe -Command` calls simple and single-purpose. Prefer project scripts, `rg -n`, `Select-String`, `Get-Content`, and other direct commands over multi-step inline scripts. If an inline command needs PowerShell variables, wrap or escape it so variables are not expanded by an outer shell before execution; if a parser error shows missing variables, empty `if` conditions, or broken pipes, rerun with safer quoting instead of debugging the project code.
 
@@ -131,10 +192,10 @@ console.log(getBatches()[0]);
 
 Avoid complex `node -e` snippets with nested quotes, template strings, `$()`, or backticks inside `powershell.exe -Command`; they are easy for PowerShell to truncate or reinterpret.
 
-Do not run `pnpm run dev` in the foreground with a short command timeout and treat the timeout as a failure. The dev server is a long-running process. For a background server on Windows, use `pnpm.cmd`, not the `pnpm` shim:
+Do not run `pnpm run dev`, `pnpm run serve`, or `pnpm run test-env:start` in the foreground with a short command timeout and treat the timeout as a failure. These are long-running server processes. For the shared background service, prefer `pnpm run service:start`. If a manual background process is truly needed on Windows, use `pnpm.cmd`, not the `pnpm` shim:
 
 ```powershell
-Start-Process -FilePath pnpm.cmd -ArgumentList 'run','dev' -WorkingDirectory 'D:\workcode\skill-eval' -RedirectStandardOutput 'D:\workcode\skill-eval\data\server.log' -RedirectStandardError 'D:\workcode\skill-eval\data\server.err.log' -WindowStyle Hidden
+Start-Process -FilePath pnpm.cmd -ArgumentList 'run','serve' -WorkingDirectory 'D:\workcode\skill-eval' -RedirectStandardOutput 'D:\workcode\skill-eval\data\logs\server.log' -RedirectStandardError 'D:\workcode\skill-eval\data\logs\server.err.log' -WindowStyle Hidden
 ```
 
 If a local review server is already listening, stop only that owning process. First determine the active port from the current task context, the `PORT` environment variable, or the server config. Use a `$port` variable instead of hard-coding a specific value, and make sure the command quoting preserves PowerShell variables until PowerShell runs:
@@ -167,19 +228,21 @@ Node prints an `ExperimentalWarning` for `node:sqlite` on Node 22. That warning 
 
 ## Validation Workflow
 
-After changing runtime code, run:
+After changing runtime code, rebuild and start the test environment on `4174`, then run:
 
 ```bash
+pnpm run test-env:reset
 pnpm run check
 pnpm run selftest
+pnpm run test-env:smoke
 ```
 
-After starting a local server, also run:
+After restarting the shared service, run:
 
 ```bash
-pnpm run smoke
+pnpm run smoke:readonly
 ```
 
-`pnpm run smoke` is read-only and should be the default API/page verification path. It caught the earlier empty item-list regression caused by a missing SQL bind parameter, so keep it in the final validation stack.
+`pnpm run smoke` is writable and should be reserved for isolated test data such as `test-env:smoke` or fixture validation. `pnpm run smoke:readonly` is the safe production-style health check for the shared `data/` service.
 
-Browser-based visual checks are useful after frontend changes. If the in-app browser tooling is available, use it after the server is running. If the browser plugin's required Node REPL tool is not exposed in the current tool surface, do not spend time trying unrelated browser-control paths; report that visual browser verification was unavailable and rely on `pnpm run smoke` for nonvisual checks.
+Browser-based visual checks are useful after frontend changes. If the in-app browser tooling is available, use it after the server is running. If the browser plugin's required Node REPL tool is not exposed in the current tool surface, do not spend time trying unrelated browser-control paths; report that visual browser verification was unavailable and rely on `pnpm run test-env:smoke` or `pnpm run smoke:readonly`, depending on the target environment, for nonvisual checks.

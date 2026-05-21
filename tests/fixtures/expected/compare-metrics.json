@@ -1,0 +1,11 @@
+{
+  "modelA": "fixture-model-a",
+  "modelB": "fixture-model-b",
+  "itemsA": 1,
+  "itemsB": 1,
+  "overallMeanA": 4.7,
+  "overallMeanB": 2.5,
+  "aggregateDelta": 2.2,
+  "matchedItems": 0,
+  "warnings": ["no_paired_items"]
+}

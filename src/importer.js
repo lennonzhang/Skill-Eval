@@ -33,6 +33,7 @@ const IMAGE_EXTENSIONS = new Map([
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 export const MAX_UPLOAD_JSON_BYTES = 50 * 1024 * 1024;
 const DEFAULT_CACHE_WORKERS = 4;
+const IMPORT_SCHEMA_VERSION = "1";
 
 export function normalizeWorkerCount(value, fallback = DEFAULT_CACHE_WORKERS) {
   const parsed = Number(value);
@@ -46,6 +47,20 @@ function hash(value) {
 
 export function computeSourceDigest(content) {
   return `sha256:${createHash("sha256").update(String(content ?? ""), "utf8").digest("hex")}`;
+}
+
+export function computeContentDigest(records = []) {
+  const normalized = records
+    .map((record) => ({
+      importKey: record.importKey,
+      model: record.model,
+      text: record.text,
+      url: record.url,
+      optimizationPrompt: record.optimizationPrompt,
+      resultUrl: record.resultUrl,
+    }))
+    .sort((a, b) => a.importKey.localeCompare(b.importKey));
+  return `sha256:${createHash("sha256").update(JSON.stringify(normalized), "utf8").digest("hex")}`;
 }
 
 function slug(value) {
@@ -456,6 +471,8 @@ function buildPreflight({ source, sourceFile, content }) {
     sourceFile,
     sourceDigest: computeSourceDigest(raw),
     sourceSizeBytes: byteLength,
+    contentDigest: computeContentDigest(parsed.records),
+    importSchemaVersion: IMPORT_SCHEMA_VERSION,
     totalRecords: payloadItems.length,
     validRecords: parsed.records.length,
     invalidRecords: parsed.errors.length,
@@ -499,6 +516,8 @@ function parseUploadedRecords({ fileName, content, expectedDigest } = {}) {
   return {
     ...recordsFromJsonPayload(payload, sourceFile),
     files: [sourceFile],
+    sourceDigest: computeSourceDigest(raw),
+    sourceSizeBytes: byteLength,
   };
 }
 
@@ -626,6 +645,8 @@ async function importRecordsBatch({
   errors,
   onProgress,
   cacheWorkers,
+  sourceDigest = null,
+  sourceSizeBytes = null,
 }) {
   initializeDatabase();
   const startedAt = nowIso();
@@ -639,12 +660,17 @@ async function importRecordsBatch({
   const batchId = batchIdForDate(date);
   const name = batchName || sourceFile;
   const importedAt = date.toISOString();
+  const contentDigest = computeContentDigest(records);
 
   createBatch({
     id: batchId,
     name,
     sourceDir,
     sourceFile,
+    sourceSha256: sourceDigest,
+    sourceSizeBytes,
+    contentSha256: contentDigest,
+    importSchemaVersion: IMPORT_SCHEMA_VERSION,
     importedAt,
   });
   emitProgress(onProgress, {
@@ -782,6 +808,10 @@ async function importRecordsBatch({
       importedAt,
       sourceDir,
       sourceFile,
+      sourceSha256: sourceDigest,
+      sourceSizeBytes,
+      contentSha256: contentDigest,
+      importSchemaVersion: IMPORT_SCHEMA_VERSION,
     },
     files: importedFiles,
     parsed: records.length,
@@ -801,6 +831,10 @@ async function importRecordsBatch({
     batchId,
     sourceDir,
     sourceFile,
+    sourceSha256: sourceDigest,
+    sourceSizeBytes,
+    contentSha256: contentDigest,
+    importSchemaVersion: IMPORT_SCHEMA_VERSION,
     startedAt,
     finishedAt: nowIso(),
     parsed: result.parsed,
@@ -837,13 +871,13 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
   }
 
   const sourceFile = normalizeResourceFileName(files[0]);
-  if (sourceDigest) {
-    const { content } = await readResourceFileContent(sourceFile);
-    if (computeSourceDigest(content) !== sourceDigest) {
-      const error = new Error("Source changed after preflight");
-      error.statusCode = 409;
-      throw error;
-    }
+  const { content } = await readResourceFileContent(sourceFile);
+  const sourceSha256 = computeSourceDigest(content);
+  const sourceSizeBytes = Buffer.byteLength(String(content ?? ""), "utf8");
+  if (sourceDigest && sourceSha256 !== sourceDigest) {
+    const error = new Error("Source changed after preflight");
+    error.statusCode = 409;
+    throw error;
   }
   const { records, errors, files: importedFiles } = await readResourceRecords({ files: [sourceFile] });
   return importRecordsBatch({
@@ -854,6 +888,8 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
     importedFiles,
     onProgress,
     records,
+    sourceDigest: sourceSha256,
+    sourceSizeBytes,
     sourceDir: "resource",
     sourceFile,
   });
@@ -861,7 +897,7 @@ export async function importResourceBatch({ batchName, downloadImages = true, fi
 
 export async function importUploadedJsonBatch({ batchName, content, downloadImages = true, fileName, onProgress, cacheWorkers, sourceDigest } = {}) {
   const sourceFile = normalizeUploadedJsonFileName(fileName);
-  const { records, errors, files: importedFiles } = parseUploadedRecords({
+  const { records, errors, files: importedFiles, sourceDigest: sourceSha256, sourceSizeBytes } = parseUploadedRecords({
     fileName: sourceFile,
     content,
     expectedDigest: sourceDigest,
@@ -874,6 +910,8 @@ export async function importUploadedJsonBatch({ batchName, content, downloadImag
     importedFiles,
     onProgress,
     records,
+    sourceDigest: sourceSha256,
+    sourceSizeBytes,
     sourceDir: "upload",
     sourceFile,
   });

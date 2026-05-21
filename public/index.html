@@ -9,41 +9,50 @@
   <body>
     <main class="shell">
       <header class="topbar">
-        <div>
-          <h1 data-i18n="app.title">Skill Eval Review</h1>
+        <div class="topbar-brand">
+          <div class="topbar-title-row">
+            <h1 data-i18n="app.title">Skill Eval Review</h1>
+            <div id="reviewerChip" class="reviewer-chip" aria-live="polite"></div>
+          </div>
           <p id="batchMeta">No batch loaded</p>
+          <p id="batchDigestMeta" class="digest-meta"></p>
         </div>
         <div class="topbar-actions">
-          <label class="language-control">
-            <span data-i18n="app.language">Language</span>
-            <select id="languageSelect" aria-label="Language">
-              <option value="en">EN</option>
-              <option value="zh">中文</option>
-            </select>
-          </label>
-          <select id="batchSelect" aria-label="Batch" data-i18n-aria-label="app.batch"></select>
-          <label class="archive-toggle">
-            <input id="showArchivedBatches" type="checkbox" />
-            <span data-i18n="batch.showArchived">Archived</span>
-          </label>
-          <div class="batch-actions">
-            <button id="archiveBatchButton" class="secondary" type="button" data-i18n="batch.archive">Archive</button>
-            <button id="restoreBatchButton" class="secondary" type="button" data-i18n="batch.restore">Restore</button>
-            <button id="deleteBatchButton" class="danger" type="button" data-i18n="batch.delete">Delete</button>
-          </div>
-          <div class="import-controls">
-            <div class="resource-import">
-              <select id="resourceSelect" aria-label="Resource JSON"></select>
-              <button id="importButton" type="button" data-i18n="actions.importResource">Import Resource</button>
+          <div class="topbar-row topbar-row--primary">
+            <label class="language-control">
+              <span data-i18n="app.language">Language</span>
+              <select id="languageSelect" aria-label="Language">
+                <option value="en">EN</option>
+                <option value="zh">中文</option>
+              </select>
+            </label>
+            <select id="batchSelect" class="batch-select" aria-label="Batch" data-i18n-aria-label="app.batch"></select>
+            <label class="archive-toggle">
+              <input id="showArchivedBatches" type="checkbox" />
+              <span data-i18n="batch.showArchived">Archived</span>
+            </label>
+            <div class="batch-actions">
+              <button id="archiveBatchButton" class="secondary" type="button" data-i18n="batch.archive">Archive</button>
+              <button id="restoreBatchButton" class="secondary" type="button" data-i18n="batch.restore">Restore</button>
+              <button id="deleteBatchButton" class="danger" type="button" data-i18n="batch.delete">Delete</button>
             </div>
-            <div class="upload-import">
-              <input id="uploadJsonInput" type="file" accept="application/json,.json" />
-              <label class="upload-json-button" for="uploadJsonInput" data-i18n="actions.chooseJson">Choose JSON</label>
-              <span id="uploadJsonMeta" data-i18n="upload.none">No file selected</span>
-              <button id="uploadImportButton" class="secondary" type="button" data-i18n="actions.importUpload">Import Upload</button>
+            <button id="runProductCheckButton" type="button">Run Product Check</button>
+            <button id="shortcutHelpButton" class="secondary icon-button" type="button" aria-label="Keyboard shortcuts" data-i18n-aria-label="actions.shortcuts">?</button>
+          </div>
+          <div class="topbar-row topbar-row--import">
+            <div class="import-controls">
+              <div class="resource-import">
+                <select id="resourceSelect" aria-label="Resource JSON"></select>
+                <button id="importButton" type="button" data-i18n="actions.importResource">Import Resource</button>
+              </div>
+              <div class="upload-import">
+                <input id="uploadJsonInput" type="file" accept="application/json,.json" />
+                <label class="upload-json-button" for="uploadJsonInput" data-i18n="actions.chooseJson">Choose JSON</label>
+                <span id="uploadJsonMeta" data-i18n="upload.none">No file selected</span>
+                <button id="uploadImportButton" class="secondary" type="button" data-i18n="actions.importUpload">Import Upload</button>
+              </div>
             </div>
           </div>
-          <button id="runProductCheckButton" type="button">Run Product Check</button>
         </div>
       </header>
 
@@ -92,7 +101,57 @@
           <span data-i18n="filters.search">Search</span>
           <input id="searchInput" type="search" placeholder="Prompt, tag, file..." data-i18n-placeholder="filters.searchPlaceholder" />
         </label>
+        <button id="advancedFilterButton" class="secondary filter-button" type="button" data-i18n="filters.advanced">Filters</button>
         <button id="nextUnreviewedButton" type="button" data-i18n="actions.nextUnreviewed">Next Unreviewed</button>
+        <div id="filterChips" class="filter-chips" aria-live="polite"></div>
+        <aside id="filterDrawer" class="filter-drawer" hidden>
+          <div class="filter-drawer-head">
+            <strong data-i18n="filters.advanced">Filters</strong>
+            <button id="closeFilterDrawerButton" class="secondary compact-button" type="button" data-i18n="filters.close">Close filters</button>
+          </div>
+          <div class="filter-drawer-grid">
+            <label>
+              <span data-i18n="filters.scoreMin">Min score</span>
+              <input id="scoreMinFilter" type="number" min="1" max="5" step="0.1" />
+            </label>
+            <label>
+              <span data-i18n="filters.scoreMax">Max score</span>
+              <input id="scoreMaxFilter" type="number" min="1" max="5" step="0.1" />
+            </label>
+            <label>
+              <span data-i18n="filters.productCheckDeltaMin">Product Check delta</span>
+              <input id="productCheckDeltaMinFilter" type="number" min="0" max="5" step="0.1" />
+            </label>
+            <label>
+              <span data-i18n="filters.reviewer">Reviewer</span>
+              <input id="reviewerFilter" type="search" data-i18n-placeholder="filters.reviewerPlaceholder" placeholder="ID or name" />
+            </label>
+            <label>
+              <span data-i18n="filters.cacheStatus">Cache</span>
+              <select id="cacheStatusFilter">
+                <option value="all" data-i18n="filters.cache.all">Any cache</option>
+                <option value="cached" data-i18n="filters.cache.cached">Both cached</option>
+                <option value="failed" data-i18n="filters.cache.failed">Any failed</option>
+                <option value="missing" data-i18n="filters.cache.missing">Any missing</option>
+                <option value="source_failed" data-i18n="filters.cache.source_failed">Source failed</option>
+                <option value="result_failed" data-i18n="filters.cache.result_failed">Result failed</option>
+              </select>
+            </label>
+          </div>
+          <div class="filter-tag-columns">
+            <div>
+              <span data-i18n="filters.tagIncludes">Require tags</span>
+              <div id="tagIncludeFilters" class="filter-tag-grid"></div>
+            </div>
+            <div>
+              <span data-i18n="filters.tagExcludes">Exclude tags</span>
+              <div id="tagExcludeFilters" class="filter-tag-grid"></div>
+            </div>
+          </div>
+          <div class="filter-drawer-actions">
+            <button id="resetFiltersButton" class="secondary" type="button" data-i18n="filters.reset">Reset filters</button>
+          </div>
+        </aside>
       </section>
 
       <aside class="stats-panel stats-strip" aria-label="Model statistics" data-i18n-aria-label="stats.aria">
@@ -138,6 +197,77 @@
     <dialog id="imageDialog">
       <button id="closeDialogButton" type="button" aria-label="Close image" data-i18n="actions.close" data-i18n-aria-label="image.closeAria">Close</button>
       <img id="dialogImage" alt="" />
+    </dialog>
+
+    <dialog id="reviewerDialog" class="reviewer-dialog">
+      <form id="reviewerForm" method="dialog" class="reviewer-card">
+        <div class="reviewer-card-header">
+          <span class="reviewer-kicker" data-i18n="reviewer.kicker">Local reviewer</span>
+          <h2 data-i18n="reviewer.title">Reviewer identity</h2>
+          <p data-i18n="reviewer.body">This browser identity is stored locally and attached to reviews and audit events.</p>
+        </div>
+        <label class="reviewer-field">
+          <span data-i18n="reviewer.id">Reviewer ID</span>
+          <input id="reviewerIdInput" name="id" autocomplete="off" maxlength="64" placeholder="name_or_team" />
+        </label>
+        <label class="reviewer-field">
+          <span data-i18n="reviewer.name">Display name</span>
+          <input id="reviewerNameInput" name="name" autocomplete="name" maxlength="120" placeholder="Reviewer name" />
+        </label>
+        <p id="reviewerDialogError" class="reviewer-error" role="alert"></p>
+        <div class="reviewer-card-actions">
+          <button id="reviewerUseLocalButton" class="secondary" type="button" data-i18n="reviewer.useLocal">Use local</button>
+          <button id="reviewerSaveButton" type="submit" data-i18n="reviewer.continue">Continue</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="shortcutDialog" class="shortcut-dialog">
+      <div class="shortcut-card">
+        <div class="shortcut-card-head">
+          <h2 data-i18n="shortcuts.title">Keyboard shortcuts</h2>
+          <button id="closeShortcutDialogButton" class="secondary compact-button" type="button" data-i18n="actions.close">Close</button>
+        </div>
+        <div class="shortcut-grid">
+          <section>
+            <h3 data-i18n="shortcuts.navigation">Navigation</h3>
+            <dl>
+              <dt>J</dt><dd data-i18n="shortcuts.next">Next item</dd>
+              <dt>K</dt><dd data-i18n="shortcuts.prev">Previous item</dd>
+              <dt>Shift+J</dt><dd data-i18n="shortcuts.nextOpen">Next unreviewed</dd>
+              <dt>Shift+K</dt><dd data-i18n="shortcuts.prevOpen">Previous unreviewed</dd>
+              <dt>G</dt><dd data-i18n="shortcuts.current">Scroll list to current</dd>
+            </dl>
+          </section>
+          <section>
+            <h3 data-i18n="shortcuts.scoring">Scoring</h3>
+            <dl>
+              <dt>1-5</dt><dd data-i18n="shortcuts.score">Set active score</dd>
+              <dt>Tab</dt><dd data-i18n="shortcuts.nextScore">Next score field</dd>
+              <dt>Shift+Tab</dt><dd data-i18n="shortcuts.prevScore">Previous score field</dd>
+            </dl>
+          </section>
+          <section>
+            <h3 data-i18n="shortcuts.save">Save and status</h3>
+            <dl>
+              <dt>Ctrl+Enter</dt><dd data-i18n="shortcuts.saveReview">Save review</dd>
+              <dt>S</dt><dd data-i18n="shortcuts.saveReview">Save review</dd>
+              <dt>R</dt><dd data-i18n="shortcuts.statusReviewed">Set reviewed</dd>
+              <dt>N</dt><dd data-i18n="shortcuts.statusRecheck">Set needs recheck</dd>
+              <dt>F</dt><dd data-i18n="shortcuts.statusFailed">Set failed</dd>
+              <dt>E</dt><dd data-i18n="shortcuts.exclude">Open exclude</dd>
+              <dt>Shift+E</dt><dd data-i18n="shortcuts.restore">Restore excluded item</dd>
+            </dl>
+          </section>
+          <section>
+            <h3 data-i18n="shortcuts.view">View</h3>
+            <dl>
+              <dt>?</dt><dd data-i18n="shortcuts.help">Open help</dd>
+              <dt>Esc</dt><dd data-i18n="shortcuts.close">Close overlay</dd>
+            </dl>
+          </section>
+        </div>
+      </div>
     </dialog>
 
     <script src="/app.js" type="module"></script>

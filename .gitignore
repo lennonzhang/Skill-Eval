@@ -3,6 +3,16 @@ resource/**/*.json
 resources/*.json
 resources/**/*.json
 
+# Resource office documents are local input/reference data.
+resource/*.docx
+resource/*.xlsx
+resource/**/*.docx
+resource/**/*.xlsx
+resources/*.docx
+resources/*.xlsx
+resources/**/*.docx
+resources/**/*.xlsx
+
 # Resource images are evaluation input/output data, not source assets.
 resource/*.png
 resource/*.jpg
@@ -65,7 +75,7 @@ __pycache__/
 # Local environment files.
 .env
 .env.*
-docs/
+docs/*
 
 # Claude worktrees.
 .claude/worktrees/

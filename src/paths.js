@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const rootDir = path.resolve(__dirname, "..");
-export const resourceDir = path.join(rootDir, "resource");
+export const resourceDir = resolveFromRoot(process.env.SKILL_EVAL_RESOURCE_DIR, path.join(rootDir, "resource"));
 
 function resolveFromRoot(value, fallback) {
   const raw = String(value || "").trim();
@@ -18,6 +18,7 @@ export const cacheDir = path.join(dataDir, "cache");
 export const importRunsDir = path.join(dataDir, "import-runs");
 export const productChecksDir = path.join(dataDir, "product-checks");
 export const taskRunsDir = path.join(dataDir, "task-runs");
+export const reportsDir = path.join(dataDir, "reports");
 
 export function dataVirtualPath(...parts) {
   return path.join("data", ...parts);

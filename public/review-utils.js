@@ -1,8 +1,39 @@
 export const ITEM_ROW_HEIGHT = 92;
 export const ITEM_OVERSCAN = 8;
 
-export const validStatusFilters = new Set(["all", "active", "unreviewed", "reviewed", "excluded"]);
+export const validStatusFilters = new Set(["all", "active", "unreviewed", "reviewed", "needs_recheck", "failed", "excluded"]);
+export const validCacheStatusFilters = new Set(["all", "cached", "failed", "missing", "source_failed", "result_failed"]);
 export const validLanguages = new Set(["en", "zh"]);
+
+function listFromParam(value) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function numberParam(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : "";
+}
+
+export function normalizeReviewFilters(input = {}) {
+  const status = String(input.status || "");
+  const cacheStatus = String(input.cacheStatus || input.cache || "");
+  return {
+    model: String(input.model || "all") || "all",
+    status: validStatusFilters.has(status) ? status : "all",
+    search: String(input.search || input.q || ""),
+    scoreMin: numberParam(input.scoreMin),
+    scoreMax: numberParam(input.scoreMax),
+    tagIncludes: Array.isArray(input.tagIncludes) ? input.tagIncludes.filter(Boolean) : listFromParam(input.tagIncludes),
+    tagExcludes: Array.isArray(input.tagExcludes) ? input.tagExcludes.filter(Boolean) : listFromParam(input.tagExcludes),
+    reviewer: String(input.reviewer || ""),
+    productCheckDeltaMin: numberParam(input.productCheckDeltaMin),
+    cacheStatus: validCacheStatusFilters.has(cacheStatus) ? cacheStatus : "all",
+  };
+}
 
 export function virtualWindow({ total, scrollTop, viewportHeight, rowHeight = ITEM_ROW_HEIGHT, overscan = ITEM_OVERSCAN }) {
   const safeTotal = Math.max(0, Math.floor(Number(total) || 0));
@@ -48,12 +79,25 @@ export function readReviewUrlState(searchParams) {
   const params = searchParams instanceof URLSearchParams ? searchParams : new URLSearchParams(searchParams || "");
   const status = params.get("status") || "";
   const language = params.get("lang") || "";
+  const filters = normalizeReviewFilters({
+    model: params.get("model") || "all",
+    status,
+    search: params.get("q") || "",
+    scoreMin: params.get("scoreMin") || "",
+    scoreMax: params.get("scoreMax") || "",
+    tagIncludes: params.get("tagIncludes") || "",
+    tagExcludes: params.get("tagExcludes") || "",
+    reviewer: params.get("reviewer") || "",
+    productCheckDeltaMin: params.get("pcDelta") || "",
+    cacheStatus: params.get("cache") || "all",
+  });
   return {
     batchId: params.get("batch") || "",
     itemId: params.get("item") || "",
-    model: params.get("model") || "all",
-    status: validStatusFilters.has(status) ? status : "all",
-    search: params.get("q") || "",
+    model: filters.model,
+    status: filters.status,
+    search: filters.search,
+    filters,
     language: validLanguages.has(language) ? language : "",
     includeArchived: params.get("archived") === "1",
   };
@@ -61,14 +105,51 @@ export function readReviewUrlState(searchParams) {
 
 export function reviewUrlParamsFromState(state) {
   const params = new URLSearchParams();
+  const filters = normalizeReviewFilters(state.filters || {});
   if (state.selectedBatchId) params.set("batch", state.selectedBatchId);
   if (state.selectedItemId) params.set("item", state.selectedItemId);
-  if (state.filters?.model && state.filters.model !== "all") params.set("model", state.filters.model);
-  if (state.filters?.status && state.filters.status !== "all") params.set("status", state.filters.status);
-  if (state.filters?.search) params.set("q", state.filters.search);
+  if (filters.model && filters.model !== "all") params.set("model", filters.model);
+  if (filters.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters.search) params.set("q", filters.search);
+  if (filters.scoreMin) params.set("scoreMin", filters.scoreMin);
+  if (filters.scoreMax) params.set("scoreMax", filters.scoreMax);
+  if (filters.tagIncludes.length) params.set("tagIncludes", filters.tagIncludes.join(","));
+  if (filters.tagExcludes.length) params.set("tagExcludes", filters.tagExcludes.join(","));
+  if (filters.reviewer) params.set("reviewer", filters.reviewer);
+  if (filters.productCheckDeltaMin) params.set("pcDelta", filters.productCheckDeltaMin);
+  if (filters.cacheStatus && filters.cacheStatus !== "all") params.set("cache", filters.cacheStatus);
   if (state.language && state.language !== "en") params.set("lang", state.language);
   if (state.showArchivedBatches) params.set("archived", "1");
   return params;
+}
+
+export function reviewItemQueryParamsFromFilters(filtersInput = {}) {
+  const filters = normalizeReviewFilters(filtersInput);
+  const params = new URLSearchParams();
+  if (filters.model !== "all") params.set("model", filters.model);
+  if (filters.status !== "all") params.set("status", filters.status);
+  if (filters.search) params.set("q", filters.search);
+  if (filters.scoreMin) params.set("scoreMin", filters.scoreMin);
+  if (filters.scoreMax) params.set("scoreMax", filters.scoreMax);
+  if (filters.tagIncludes.length) params.set("tagIncludes", filters.tagIncludes.join(","));
+  if (filters.tagExcludes.length) params.set("tagExcludes", filters.tagExcludes.join(","));
+  if (filters.reviewer) params.set("reviewer", filters.reviewer);
+  if (filters.productCheckDeltaMin) params.set("productCheckDeltaMin", filters.productCheckDeltaMin);
+  if (filters.cacheStatus !== "all") params.set("cacheStatus", filters.cacheStatus);
+  return params;
+}
+
+export function hasAdvancedReviewFilters(filtersInput = {}) {
+  const filters = normalizeReviewFilters(filtersInput);
+  return Boolean(
+    filters.scoreMin ||
+      filters.scoreMax ||
+      filters.tagIncludes.length ||
+      filters.tagExcludes.length ||
+      filters.reviewer ||
+      filters.productCheckDeltaMin ||
+      filters.cacheStatus !== "all"
+  );
 }
 
 export function normalizeTaskCard(taskLike) {

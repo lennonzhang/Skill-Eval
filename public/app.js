@@ -1,16 +1,19 @@
 import { calculateOverallScore, scoreFields, statusOptions, tagOptions } from "./scoring.js";
 import {
+  hasAdvancedReviewFilters,
   ITEM_OVERSCAN,
   ITEM_ROW_HEIGHT,
+  normalizeReviewFilters,
   normalizeTaskCard,
   readReviewUrlState,
+  reviewItemQueryParamsFromFilters,
   reviewUrlParamsFromState,
   targetScrollTopForIndex,
   taskProgressPercent,
   virtualWindow,
 } from "./review-utils.js";
 
-const excludeReasons = ["bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"];
+const excludeReasons = ["internal_test", "bad_input", "duplicate", "wrong_task", "missing_image", "not_evaluable", "other"];
 
 const translations = {
   en: {
@@ -35,6 +38,8 @@ const translations = {
     "actions.restore": "Restore",
     "actions.cancel": "Cancel",
     "actions.scrollCurrent": "Current",
+    "actions.shortcuts": "快捷键",
+    "actions.shortcuts": "Shortcuts",
     "batch.archive": "Archive",
     "batch.restore": "Restore",
     "batch.delete": "Delete",
@@ -45,12 +50,29 @@ const translations = {
     "batch.deleteConfirm": "Type the full batch id to delete local records and artifacts:",
     "batch.deleteMismatch": "Batch id did not match. Delete cancelled.",
     "batch.deletePlan": "Delete plan",
-    "batch.deletePlanSummary": "{items} items | {evaluations} evaluations | {bytes} local bytes",
+    "batch.deletePlanSummary": "{items} items | {evaluations} evaluations | {annotations} annotations | {bytes} local bytes",
+    "batch.sourceDigest": "source {digest}",
+    "batch.contentDigest": "content {digest}",
+    "batch.schema": "schema {version}",
+    "reviewer.label": "Reviewer",
+    "reviewer.kicker": "Local reviewer",
+    "reviewer.title": "Reviewer identity",
+    "reviewer.body": "This browser identity is stored locally and attached to reviews and audit events.",
+    "reviewer.id": "Reviewer ID",
+    "reviewer.name": "Display name",
+    "reviewer.continue": "Continue",
+    "reviewer.useLocal": "Use local",
+    "reviewer.edit": "Edit reviewer",
+    "reviewer.locked": "Locked by server",
+    "reviewer.idHelp": "Use letters, numbers, dot, underscore, or dash.",
+    "reviewer.errorRequired": "Enter a reviewer ID or use local.",
+    "reviewer.errorId": "Reviewer ID can use letters, numbers, dot, underscore, or dash.",
     "preflight.title": "Import Preflight",
     "preflight.running": "Checking JSON...",
     "preflight.ready": "{valid}/{total} valid | {invalid} invalid | {models} model(s)",
     "preflight.digest": "digest {digest}",
     "preflight.duplicates": "{count} duplicate record(s)",
+    "preflight.existingDigest": "{count} existing batch(es) share this source digest",
     "preflight.errors": "{count} error(s), showing first {shown}",
     "preflight.failed": "Preflight failed",
     "preflight.required": "Run preflight before import.",
@@ -87,6 +109,32 @@ const translations = {
     "filters.search": "Search",
     "filters.searchPlaceholder": "Prompt, tag, file...",
     "filters.allModels": "All models",
+    "filters.advanced": "Filters",
+    "filters.close": "Close filters",
+    "filters.reset": "Reset filters",
+    "filters.scoreMin": "Min score",
+    "filters.scoreMax": "Max score",
+    "filters.tagIncludes": "Require tags",
+    "filters.tagExcludes": "Exclude tags",
+    "filters.reviewer": "Reviewer",
+    "filters.reviewerPlaceholder": "ID or name",
+    "filters.productCheckDeltaMin": "Product Check delta",
+    "filters.cacheStatus": "Cache",
+    "filters.cache.all": "Any cache",
+    "filters.cache.cached": "Both cached",
+    "filters.cache.failed": "Any failed",
+    "filters.cache.missing": "Any missing",
+    "filters.cache.source_failed": "Source failed",
+    "filters.cache.result_failed": "Result failed",
+    "filters.chip.scoreMin": "Score >= {value}",
+    "filters.chip.scoreMax": "Score <= {value}",
+    "filters.chip.tagIncludes": "Has {value}",
+    "filters.chip.tagExcludes": "No {value}",
+    "filters.chip.reviewer": "Reviewer {value}",
+    "filters.chip.productCheckDeltaMin": "Delta >= {value}",
+    "filters.chip.cacheStatus": "Cache {value}",
+    "filters.status.needs_recheck": "Needs recheck",
+    "filters.status.failed": "Failed",
     "queue.aria": "Items",
     "queue.title": "Items",
     "queue.visible": "{count} visible",
@@ -108,6 +156,7 @@ const translations = {
     "review.comment": "Comment",
     "review.commentPlaceholder": "Reviewer notes",
     "review.tags": "Tags",
+    "review.unsaved": "Unsaved changes",
     "review.excluded": "Excluded",
     "review.excludeReason": "Reason",
     "review.excludeNote": "Note",
@@ -116,6 +165,7 @@ const translations = {
     "review.excludeDescription": "Excluded items remain visible but do not count toward review statistics.",
     "review.excludeState": "This item is excluded from statistics and review progress.",
     "review.excludeSaved": "Exclusion updated",
+    "review.reason.internal_test": "Internal test",
     "review.reason.bad_input": "Bad input",
     "review.reason.duplicate": "Duplicate",
     "review.reason.wrong_task": "Wrong task",
@@ -124,6 +174,11 @@ const translations = {
     "review.reason.other": "Other",
     "review.originalPrompt": "Original Prompt",
     "review.optimizedPrompt": "Optimized Prompt",
+    "review.history": "Review History",
+    "review.noHistory": "No saved review history.",
+    "review.reviewer": "Reviewer",
+    "audit.timeline": "Audit Timeline",
+    "audit.noEvents": "No audit events for this item.",
     "productCheck.title": "Product Check",
     "productCheck.none": "No product-check result for this batch.",
     "productCheck.noItem": "No product-check result for this item.",
@@ -207,6 +262,27 @@ const translations = {
     "status.reviewed": "reviewed",
     "status.needs_recheck": "needs_recheck",
     "status.failed": "failed",
+    "shortcuts.title": "Keyboard shortcuts",
+    "shortcuts.navigation": "Navigation",
+    "shortcuts.scoring": "Scoring",
+    "shortcuts.save": "Save and status",
+    "shortcuts.view": "View",
+    "shortcuts.next": "Next item",
+    "shortcuts.prev": "Previous item",
+    "shortcuts.nextOpen": "Next unreviewed",
+    "shortcuts.prevOpen": "Previous unreviewed",
+    "shortcuts.current": "Scroll list to current",
+    "shortcuts.score": "Set active score",
+    "shortcuts.nextScore": "Next score field",
+    "shortcuts.prevScore": "Previous score field",
+    "shortcuts.saveReview": "Save review",
+    "shortcuts.statusReviewed": "Set reviewed",
+    "shortcuts.statusRecheck": "Set needs recheck",
+    "shortcuts.statusFailed": "Set failed",
+    "shortcuts.exclude": "Open exclude",
+    "shortcuts.restore": "Restore excluded item",
+    "shortcuts.help": "Open help",
+    "shortcuts.close": "Close overlay",
   },
   zh: {
     "app.title": "Skill Eval 评审",
@@ -240,12 +316,29 @@ const translations = {
     "batch.deleteConfirm": "输入完整 batch id 以删除本地记录和产物：",
     "batch.deleteMismatch": "batch id 不匹配，已取消删除。",
     "batch.deletePlan": "删除计划",
-    "batch.deletePlanSummary": "{items} 条 item | {evaluations} 条评审 | {bytes} 本地产物",
+    "batch.deletePlanSummary": "{items} 条 item | {evaluations} 条评审 | {annotations} 条历史 | {bytes} 本地产物",
+    "batch.sourceDigest": "source {digest}",
+    "batch.contentDigest": "content {digest}",
+    "batch.schema": "schema {version}",
+    "reviewer.label": "评审者",
+    "reviewer.kicker": "本机浏览器评审者",
+    "reviewer.title": "评审者身份",
+    "reviewer.body": "此浏览器身份只保存在本机，会写入评审历史和审计事件。",
+    "reviewer.id": "评审者 ID",
+    "reviewer.name": "显示名称",
+    "reviewer.continue": "继续",
+    "reviewer.useLocal": "使用 local",
+    "reviewer.edit": "编辑评审者",
+    "reviewer.locked": "服务端锁定",
+    "reviewer.idHelp": "可使用字母、数字、点、下划线或短横线。",
+    "reviewer.errorRequired": "请输入评审者 ID，或使用 local。",
+    "reviewer.errorId": "评审者 ID 只能使用字母、数字、点、下划线或短横线。",
     "preflight.title": "导入预检",
     "preflight.running": "正在检查 JSON...",
     "preflight.ready": "{valid}/{total} 条可导入 | {invalid} 条异常 | {models} 个模型",
     "preflight.digest": "摘要 {digest}",
     "preflight.duplicates": "{count} 条重复记录",
+    "preflight.existingDigest": "已有 {count} 个批次使用相同 source digest",
     "preflight.errors": "{count} 条错误，显示前 {shown} 条",
     "preflight.failed": "预检失败",
     "preflight.required": "请先完成预检再导入。",
@@ -282,6 +375,32 @@ const translations = {
     "filters.search": "搜索",
     "filters.searchPlaceholder": "提示词、标签、文件...",
     "filters.allModels": "全部模型",
+    "filters.advanced": "筛选",
+    "filters.close": "关闭筛选",
+    "filters.reset": "重置筛选",
+    "filters.scoreMin": "最低分",
+    "filters.scoreMax": "最高分",
+    "filters.tagIncludes": "必须包含标签",
+    "filters.tagExcludes": "排除标签",
+    "filters.reviewer": "评审者",
+    "filters.reviewerPlaceholder": "ID 或名称",
+    "filters.productCheckDeltaMin": "产品检查分差",
+    "filters.cacheStatus": "缓存",
+    "filters.cache.all": "任意缓存",
+    "filters.cache.cached": "两图已缓存",
+    "filters.cache.failed": "任一失败",
+    "filters.cache.missing": "任一缺失",
+    "filters.cache.source_failed": "原图失败",
+    "filters.cache.result_failed": "结果失败",
+    "filters.chip.scoreMin": "分数 >= {value}",
+    "filters.chip.scoreMax": "分数 <= {value}",
+    "filters.chip.tagIncludes": "含 {value}",
+    "filters.chip.tagExcludes": "不含 {value}",
+    "filters.chip.reviewer": "评审者 {value}",
+    "filters.chip.productCheckDeltaMin": "分差 >= {value}",
+    "filters.chip.cacheStatus": "缓存 {value}",
+    "filters.status.needs_recheck": "需复查",
+    "filters.status.failed": "失败",
     "queue.aria": "条目",
     "queue.title": "条目",
     "queue.visible": "显示 {count} 条",
@@ -303,6 +422,7 @@ const translations = {
     "review.comment": "备注",
     "review.commentPlaceholder": "评审备注",
     "review.tags": "标签",
+    "review.unsaved": "有未保存修改",
     "review.excluded": "已排除",
     "review.excludeReason": "原因",
     "review.excludeNote": "备注",
@@ -311,6 +431,7 @@ const translations = {
     "review.excludeDescription": "已排除条目仍可查看，但不参与评审统计。",
     "review.excludeState": "此条目已从统计和评审进度中排除。",
     "review.excludeSaved": "排除状态已更新",
+    "review.reason.internal_test": "内部测试",
     "review.reason.bad_input": "输入异常",
     "review.reason.duplicate": "重复条目",
     "review.reason.wrong_task": "任务不符",
@@ -319,6 +440,11 @@ const translations = {
     "review.reason.other": "其他",
     "review.originalPrompt": "原始提示词",
     "review.optimizedPrompt": "优化提示词",
+    "review.history": "评审历史",
+    "review.noHistory": "还没有保存的评审历史。",
+    "review.reviewer": "评审者",
+    "audit.timeline": "审计时间线",
+    "audit.noEvents": "当前条目还没有审计事件。",
     "productCheck.title": "产品检查",
     "productCheck.none": "当前批次还没有产品检查结果。",
     "productCheck.noItem": "当前条目没有产品检查结果。",
@@ -399,6 +525,27 @@ const translations = {
     "status.reviewed": "已评审",
     "status.needs_recheck": "需复查",
     "status.failed": "失败",
+    "shortcuts.title": "快捷键",
+    "shortcuts.navigation": "导航",
+    "shortcuts.scoring": "评分",
+    "shortcuts.save": "保存与状态",
+    "shortcuts.view": "视图",
+    "shortcuts.next": "下一条",
+    "shortcuts.prev": "上一条",
+    "shortcuts.nextOpen": "下一个未评审",
+    "shortcuts.prevOpen": "上一个未评审",
+    "shortcuts.current": "左侧回到当前项",
+    "shortcuts.score": "设置当前评分",
+    "shortcuts.nextScore": "下一个评分维度",
+    "shortcuts.prevScore": "上一个评分维度",
+    "shortcuts.saveReview": "保存评审",
+    "shortcuts.statusReviewed": "设为已评审",
+    "shortcuts.statusRecheck": "设为需复查",
+    "shortcuts.statusFailed": "设为失败",
+    "shortcuts.exclude": "打开排除",
+    "shortcuts.restore": "恢复已排除项",
+    "shortcuts.help": "打开帮助",
+    "shortcuts.close": "关闭浮层",
     "resources.none": "没有 JSON 文件",
     "upload.none": "未选择文件",
     "upload.invalidJson": "请选择 .json 文件。",
@@ -406,6 +553,8 @@ const translations = {
 };
 
 const initialUrlState = readReviewUrlState(window.location.search);
+const REVIEWER_STORAGE_KEY = "skillEvalReviewer.v1";
+const REVIEWER_ID_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 
 function initialLanguage() {
   if (initialUrlState.language && translations[initialUrlState.language]) return initialUrlState.language;
@@ -414,20 +563,61 @@ function initialLanguage() {
   return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
+function normalizeReviewerCandidate(input) {
+  const id = String(input?.id || "").trim();
+  const name = String(input?.name || "").trim();
+  if (!id && !name) return null;
+  if (id && !REVIEWER_ID_PATTERN.test(id)) return null;
+  return { id: id || "local", name: name || id || "local", source: "browser", locked: false };
+}
+
+function readStoredReviewer() {
+  try {
+    return normalizeReviewerCandidate(JSON.parse(localStorage.getItem(REVIEWER_STORAGE_KEY) || "null"));
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredReviewer(reviewer) {
+  const normalized = normalizeReviewerCandidate(reviewer) || { id: "local", name: "local", source: "browser", locked: false };
+  localStorage.setItem(REVIEWER_STORAGE_KEY, JSON.stringify({ id: normalized.id, name: normalized.name }));
+  state.browserReviewer = normalized;
+  return normalized;
+}
+
+function activeBrowserReviewer() {
+  if (state.reviewer?.source === "env" || state.reviewer?.locked) return null;
+  return state.browserReviewer;
+}
+
+function effectiveReviewerForDisplay() {
+  if (state.reviewer?.source === "env" || state.reviewer?.locked) return state.reviewer;
+  return state.browserReviewer || state.reviewer;
+}
+
 const state = {
   language: initialLanguage(),
   batches: [],
   resources: [],
+  reviewer: null,
+  browserReviewer: readStoredReviewer(),
+  reviewerDialogError: "",
   selectedResourceFile: "",
   selectedUploadFile: null,
   selectedUploadContent: "",
   showArchivedBatches: initialUrlState.includeArchived,
   preflight: null,
+  preflightDuplicateBatches: [],
   preflightSource: "",
   preflightError: "",
   preflightPending: false,
   selectedBatchId: initialUrlState.batchId,
   items: [],
+  allItems: [],
+  itemQuerySummary: null,
+  annotations: [],
+  auditEvents: [],
   stats: null,
   productCheck: null,
   productCheckRun: null,
@@ -450,16 +640,21 @@ const state = {
   autoBrowserCacheAttempted: new Set(),
   autoBrowserCacheRun: null,
   reviewDrafts: {},
-  filters: {
+  activeScoreFieldIndex: 0,
+  shortcutHelpOpen: false,
+  filters: normalizeReviewFilters(initialUrlState.filters || {
     model: initialUrlState.model,
     status: initialUrlState.status,
     search: initialUrlState.search,
-  },
+  }),
+  filterDrawerOpen: false,
 };
 
 const els = {
   languageSelect: document.querySelector("#languageSelect"),
   batchMeta: document.querySelector("#batchMeta"),
+  batchDigestMeta: document.querySelector("#batchDigestMeta"),
+  reviewerChip: document.querySelector("#reviewerChip"),
   taskProgressStrip: document.querySelector("#taskProgressStrip"),
   preflightPanel: document.querySelector("#preflightPanel"),
   batchSelect: document.querySelector("#batchSelect"),
@@ -482,6 +677,21 @@ const els = {
   modelFilter: document.querySelector("#modelFilter"),
   statusFilter: document.querySelector("#statusFilter"),
   searchInput: document.querySelector("#searchInput"),
+  advancedFilterButton: document.querySelector("#advancedFilterButton"),
+  filterChips: document.querySelector("#filterChips"),
+  filterDrawer: document.querySelector("#filterDrawer"),
+  closeFilterDrawerButton: document.querySelector("#closeFilterDrawerButton"),
+  shortcutHelpButton: document.querySelector("#shortcutHelpButton"),
+  shortcutDialog: document.querySelector("#shortcutDialog"),
+  closeShortcutDialogButton: document.querySelector("#closeShortcutDialogButton"),
+  resetFiltersButton: document.querySelector("#resetFiltersButton"),
+  scoreMinFilter: document.querySelector("#scoreMinFilter"),
+  scoreMaxFilter: document.querySelector("#scoreMaxFilter"),
+  reviewerFilter: document.querySelector("#reviewerFilter"),
+  productCheckDeltaMinFilter: document.querySelector("#productCheckDeltaMinFilter"),
+  cacheStatusFilter: document.querySelector("#cacheStatusFilter"),
+  tagIncludeFilters: document.querySelector("#tagIncludeFilters"),
+  tagExcludeFilters: document.querySelector("#tagExcludeFilters"),
   nextUnreviewedButton: document.querySelector("#nextUnreviewedButton"),
   visibleCount: document.querySelector("#visibleCount"),
   itemList: document.querySelector("#itemList"),
@@ -491,6 +701,13 @@ const els = {
   imageDialog: document.querySelector("#imageDialog"),
   dialogImage: document.querySelector("#dialogImage"),
   closeDialogButton: document.querySelector("#closeDialogButton"),
+  reviewerDialog: document.querySelector("#reviewerDialog"),
+  reviewerForm: document.querySelector("#reviewerForm"),
+  reviewerIdInput: document.querySelector("#reviewerIdInput"),
+  reviewerNameInput: document.querySelector("#reviewerNameInput"),
+  reviewerDialogError: document.querySelector("#reviewerDialogError"),
+  reviewerUseLocalButton: document.querySelector("#reviewerUseLocalButton"),
+  reviewerSaveButton: document.querySelector("#reviewerSaveButton"),
 };
 
 function t(key, values = {}) {
@@ -534,15 +751,28 @@ function applyStaticTranslations() {
 }
 
 async function api(path, options = {}) {
+  const headers = {
+    "content-type": "application/json",
+    ...(options.headers || {}),
+    ...reviewerRequestHeaders(),
+  };
   const response = await fetch(path, {
-    headers: { "content-type": "application/json" },
     ...options,
+    headers,
   });
   const body = await response.json();
   if (!response.ok) {
     throw new Error(body.error || "Request failed");
   }
   return body;
+}
+
+function reviewerRequestHeaders() {
+  const headers = {};
+  const reviewer = activeBrowserReviewer();
+  if (reviewer?.id) headers["x-skill-eval-reviewer-id"] = reviewer.id;
+  if (reviewer?.name) headers["x-skill-eval-reviewer-name"] = encodeURIComponent(reviewer.name);
+  return headers;
 }
 
 function scoreValue(item, field) {
@@ -569,6 +799,11 @@ function syncFilterControls() {
   els.searchInput.value = state.filters.search;
   els.modelFilter.value = state.filters.model;
   els.statusFilter.value = state.filters.status;
+  if (els.scoreMinFilter) els.scoreMinFilter.value = state.filters.scoreMin;
+  if (els.scoreMaxFilter) els.scoreMaxFilter.value = state.filters.scoreMax;
+  if (els.reviewerFilter) els.reviewerFilter.value = state.filters.reviewer;
+  if (els.productCheckDeltaMinFilter) els.productCheckDeltaMinFilter.value = state.filters.productCheckDeltaMin;
+  if (els.cacheStatusFilter) els.cacheStatusFilter.value = state.filters.cacheStatus;
 }
 
 function writeUrlState({ replace = true } = {}) {
@@ -592,22 +827,57 @@ function scheduleUrlStateSync() {
 
 function filteredItems() {
   const query = state.filters.search.trim().toLowerCase();
+  const scoreMin = state.filters.scoreMin === "" ? null : Number(state.filters.scoreMin);
+  const scoreMax = state.filters.scoreMax === "" ? null : Number(state.filters.scoreMax);
+  const productCheckByItemId = new Map((state.productCheck?.items || []).map((item) => [item.itemId, item]));
+  const productCheckDeltaMin = state.filters.productCheckDeltaMin === "" ? null : Number(state.filters.productCheckDeltaMin);
   return state.items.filter((item) => {
     const excluded = isExcluded(item);
+    const reviewed = isReviewed(item);
     if (state.filters.model !== "all" && item.model !== state.filters.model) return false;
     if (state.filters.status === "active" && excluded) return false;
     if (state.filters.status === "excluded" && !excluded) return false;
-    if (state.filters.status === "reviewed" && (excluded || !isReviewed(item))) return false;
-    if (state.filters.status === "unreviewed" && (excluded || isReviewed(item))) return false;
+    if (state.filters.status === "reviewed" && (excluded || !reviewed || item.status !== "reviewed")) return false;
+    if (state.filters.status === "needs_recheck" && (excluded || item.status !== "needs_recheck")) return false;
+    if (state.filters.status === "failed" && (excluded || item.status !== "failed")) return false;
+    if (state.filters.status === "unreviewed" && (excluded || reviewed)) return false;
+    if (Number.isFinite(scoreMin) && (!reviewed || Number(item.overall_score) < scoreMin)) return false;
+    if (Number.isFinite(scoreMax) && (!reviewed || Number(item.overall_score) > scoreMax)) return false;
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    if (state.filters.tagIncludes.length && !state.filters.tagIncludes.every((tag) => tags.includes(tag))) return false;
+    if (state.filters.tagExcludes.length && state.filters.tagExcludes.some((tag) => tags.includes(tag))) return false;
+    if (state.filters.reviewer) {
+      const reviewerText = `${item.reviewer_id || ""} ${item.reviewer_name || ""}`.toLowerCase();
+      if (!reviewerText.includes(state.filters.reviewer.toLowerCase())) return false;
+    }
+    if (state.filters.cacheStatus !== "all") {
+      const source = item.source_fetch_status || "missing";
+      const result = item.result_fetch_status || "missing";
+      if (state.filters.cacheStatus === "cached" && (source !== "success" || result !== "success")) return false;
+      if (state.filters.cacheStatus === "failed" && source !== "failed" && result !== "failed") return false;
+      if (state.filters.cacheStatus === "missing" && source === "success" && result === "success") return false;
+      if (state.filters.cacheStatus === "source_failed" && source !== "failed") return false;
+      if (state.filters.cacheStatus === "result_failed" && result !== "failed") return false;
+    }
+    if (Number.isFinite(productCheckDeltaMin)) {
+      const productCheck = productCheckByItemId.get(item.id);
+      const suggested = Number(productCheck?.suggestedScore);
+      const human = Number(item.product_preservation_score);
+      if (!Number.isFinite(suggested) || !Number.isFinite(human)) return false;
+      if (Math.abs(suggested - human) < productCheckDeltaMin) return false;
+    }
     if (!query) return true;
     const haystack = [
+      item.id,
       item.model,
       item.text,
       item.optimization_prompt,
       item.raw_json_file,
       item.exclude_reason,
       item.exclude_note,
-      ...(Array.isArray(item.tags) ? item.tags : []),
+      item.reviewer_id,
+      item.reviewer_name,
+      ...tags,
     ]
       .join(" ")
       .toLowerCase();
@@ -626,6 +896,278 @@ function nextItemIdAfterExclusion(itemId) {
   if (nextVisibleTask) return nextVisibleTask.id;
 
   return state.items.find((item) => item.id !== itemId && !isExcluded(item))?.id || "";
+}
+
+function applyFilterChange({ reload = true, resetSelection = false } = {}) {
+  state.filters = normalizeReviewFilters(state.filters);
+  if (resetSelection) {
+    state.selectedItemId = "";
+  }
+  resetItemListScroll();
+  scheduleUrlStateSync();
+  if (reload && state.selectedBatchId) {
+    loadBatch(state.selectedBatchId, state.selectedItemId, { skipAutoBrowserCache: true }).catch((error) => {
+      alert(error.message);
+    });
+  } else {
+    const visible = filteredItems();
+    if (!visible.some((item) => item.id === state.selectedItemId)) {
+      state.selectedItemId = visible[0]?.id || "";
+    }
+    render();
+  }
+}
+
+function setTagFilter(side, tag, selected) {
+  const include = new Set(state.filters.tagIncludes);
+  const exclude = new Set(state.filters.tagExcludes);
+  if (side === "include") {
+    if (selected) {
+      include.add(tag);
+      exclude.delete(tag);
+    } else {
+      include.delete(tag);
+    }
+  } else {
+    if (selected) {
+      exclude.add(tag);
+      include.delete(tag);
+    } else {
+      exclude.delete(tag);
+    }
+  }
+  state.filters.tagIncludes = [...include].sort();
+  state.filters.tagExcludes = [...exclude].sort();
+}
+
+function removeFilterChip(key, value = "") {
+  if (key === "tagIncludes") {
+    state.filters.tagIncludes = state.filters.tagIncludes.filter((tag) => tag !== value);
+  } else if (key === "tagExcludes") {
+    state.filters.tagExcludes = state.filters.tagExcludes.filter((tag) => tag !== value);
+  } else if (key === "cacheStatus") {
+    state.filters.cacheStatus = "all";
+  } else {
+    state.filters[key] = "";
+  }
+  applyFilterChange();
+}
+
+function resetAdvancedFilters() {
+  state.filters = {
+    ...state.filters,
+    scoreMin: "",
+    scoreMax: "",
+    tagIncludes: [],
+    tagExcludes: [],
+    reviewer: "",
+    productCheckDeltaMin: "",
+    cacheStatus: "all",
+  };
+  applyFilterChange();
+}
+
+function isTypingTarget(target) {
+  const element = target instanceof Element ? target : null;
+  if (!element) return false;
+  return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function selectedVisibleIndex() {
+  return filteredItems().findIndex((item) => item.id === state.selectedItemId);
+}
+
+function selectVisibleByOffset(offset) {
+  const visible = filteredItems();
+  if (!visible.length) return;
+  const currentIndex = selectedVisibleIndex();
+  const nextIndex = Math.max(0, Math.min(visible.length - 1, (currentIndex < 0 ? 0 : currentIndex) + offset));
+  if (visible[nextIndex]?.id) {
+    captureReviewDraft(state.selectedItemId);
+    state.selectedItemId = visible[nextIndex].id;
+    resetOverlayState();
+    loadSelectedItemContext().then(() => {
+      scheduleUrlStateSync();
+      render();
+      scrollCurrentItemIntoView();
+    });
+  }
+}
+
+function selectUnreviewedByDirection(direction) {
+  const visible = filteredItems().filter((item) => !isExcluded(item) && !isReviewed(item));
+  if (!visible.length) return;
+  const currentIndex = visible.findIndex((item) => item.id === state.selectedItemId);
+  const nextIndex =
+    currentIndex < 0 ? (direction > 0 ? 0 : visible.length - 1) : Math.max(0, Math.min(visible.length - 1, currentIndex + direction));
+  captureReviewDraft(state.selectedItemId);
+  state.selectedItemId = visible[nextIndex].id;
+  resetOverlayState();
+  loadSelectedItemContext().then(() => {
+    scheduleUrlStateSync();
+    render();
+    scrollCurrentItemIntoView();
+  });
+}
+
+function setActiveScoreField(index) {
+  state.activeScoreFieldIndex = Math.max(0, Math.min(scoreFields.length - 1, index));
+  renderScoreFocus();
+}
+
+function renderScoreFocus() {
+  const formEl = document.querySelector("#evaluationForm");
+  if (!formEl) return;
+  for (const row of formEl.querySelectorAll(".score-row")) {
+    row.classList.toggle("active", Number(row.dataset.scoreIndex) === state.activeScoreFieldIndex);
+  }
+}
+
+function markUnsaved() {
+  const item = selectedItem();
+  if (!item || isExcluded(item)) return;
+  captureReviewDraft(item.id);
+  const saveNote = document.querySelector("#saveNote");
+  if (saveNote) saveNote.textContent = t("review.unsaved");
+}
+
+function setActiveScoreValue(value) {
+  const item = selectedItem();
+  const formEl = document.querySelector("#evaluationForm");
+  if (!item || !formEl || isExcluded(item)) return;
+  const field = scoreFields[state.activeScoreFieldIndex]?.field;
+  const input = field ? formEl.elements[field] : null;
+  if (!input) return;
+  input.value = String(value);
+  const output = formEl.querySelector(`[data-score-value="${field}"]`);
+  if (output) output.textContent = String(value);
+  const overall = document.querySelector("#overallScore");
+  if (overall) overall.textContent = calculateOverall(readScoreForm(formEl));
+  markUnsaved();
+}
+
+function setReviewStatus(status) {
+  const formEl = document.querySelector("#evaluationForm");
+  const item = selectedItem();
+  if (!formEl || !item || isExcluded(item)) return;
+  formEl.elements.status.value = status;
+  markUnsaved();
+}
+
+function submitCurrentReview() {
+  const formEl = document.querySelector("#evaluationForm");
+  if (!formEl) return;
+  formEl.requestSubmit();
+}
+
+function openShortcutDialog() {
+  state.shortcutHelpOpen = true;
+  applyStaticTranslations();
+  els.shortcutDialog?.showModal();
+}
+
+function closeShortcutDialog() {
+  state.shortcutHelpOpen = false;
+  els.shortcutDialog?.close();
+}
+
+function closeTopLayer() {
+  if (els.shortcutDialog?.open) {
+    closeShortcutDialog();
+    return true;
+  }
+  if (state.filterDrawerOpen) {
+    state.filterDrawerOpen = false;
+    renderAdvancedFilters();
+    return true;
+  }
+  return false;
+}
+
+function handleGlobalKeydown(event) {
+  if (event.defaultPrevented) return;
+  if (event.key === "Escape") {
+    if (closeTopLayer()) event.preventDefault();
+    return;
+  }
+  if (isTypingTarget(event.target)) return;
+  if (event.key === "?") {
+    event.preventDefault();
+    openShortcutDialog();
+    return;
+  }
+  if (!state.selectedItemId) return;
+  const key = event.key.toLowerCase();
+  if (event.ctrlKey && key === "enter") {
+    event.preventDefault();
+    submitCurrentReview();
+    return;
+  }
+  if (/^[1-5]$/.test(event.key)) {
+    event.preventDefault();
+    setActiveScoreValue(Number(event.key));
+    return;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    setActiveScoreField(state.activeScoreFieldIndex + (event.shiftKey ? -1 : 1));
+    return;
+  }
+  if (key === "j") {
+    event.preventDefault();
+    event.shiftKey ? selectUnreviewedByDirection(1) : selectVisibleByOffset(1);
+  } else if (key === "k") {
+    event.preventDefault();
+    event.shiftKey ? selectUnreviewedByDirection(-1) : selectVisibleByOffset(-1);
+  } else if (key === "g") {
+    event.preventDefault();
+    scrollCurrentItemIntoView();
+  } else if (key === "s") {
+    event.preventDefault();
+    submitCurrentReview();
+  } else if (key === "r") {
+    event.preventDefault();
+    setReviewStatus("reviewed");
+  } else if (key === "n") {
+    event.preventDefault();
+    setReviewStatus("needs_recheck");
+  } else if (key === "f") {
+    event.preventDefault();
+    setReviewStatus("failed");
+  } else if (key === "e") {
+    event.preventDefault();
+    const item = selectedItem();
+    if (!item) return;
+    if (event.shiftKey && isExcluded(item)) {
+      updateItemExclusion(item.id, { excluded: false }).catch((error) => alert(error.message));
+    } else if (!isExcluded(item)) {
+      document.querySelector("#excludeForm select")?.focus();
+    }
+  }
+}
+
+function shortDigest(value) {
+  return String(value || "").slice(0, 19);
+}
+
+function reviewerLabel(reviewer = state.reviewer) {
+  if (!reviewer?.id && !reviewer?.name) return "local";
+  if (reviewer.id && reviewer.name && reviewer.id !== reviewer.name) return `${reviewer.name} (${reviewer.id})`;
+  return reviewer.name || reviewer.id;
+}
+
+function renderReviewerChip() {
+  if (!els.reviewerChip) return;
+  const reviewer = effectiveReviewerForDisplay();
+  const locked = reviewer?.source === "env" || reviewer?.locked;
+  els.reviewerChip.innerHTML = `
+    <span>${escapeHtml(t("reviewer.label"))}</span>
+    <strong>${escapeHtml(reviewerLabel(reviewer))}</strong>
+    ${locked ? `<em>${escapeHtml(t("reviewer.locked"))}</em>` : ""}
+  `;
+  els.reviewerChip.title = locked ? t("reviewer.locked") : t("reviewer.edit");
+  els.reviewerChip.tabIndex = locked ? -1 : 0;
+  els.reviewerChip.setAttribute("role", locked ? "status" : "button");
 }
 
 function renderBatchSelect() {
@@ -718,6 +1260,7 @@ function renderPreflight() {
         })
       )}</span>
       ${preflight.duplicates?.withinFile ? `<span>${escapeHtml(t("preflight.duplicates", { count: preflight.duplicates.withinFile }))}</span>` : ""}
+      ${state.preflightDuplicateBatches.length ? `<span>${escapeHtml(t("preflight.existingDigest", { count: state.preflightDuplicateBatches.length }))}</span>` : ""}
     </div>
     ${
       errors.length
@@ -740,6 +1283,7 @@ function renderMetrics() {
   const batch = selectedBatch();
   if (!batch) {
     els.batchMeta.textContent = t("empty.noBatch");
+    els.batchDigestMeta.textContent = "";
     els.runProductCheckButton.disabled = true;
     els.runProductCheckButton.textContent = t("actions.runProductCheck");
     els.archiveBatchButton.disabled = true;
@@ -753,6 +1297,11 @@ function renderMetrics() {
   const excludedText = excluded ? ` | ${t("metrics.excluded")}: ${excluded}` : "";
   const runStatus = state.productCheckRun?.status || (state.productCheck ? "succeeded" : t("productCheck.notRun"));
   els.batchMeta.textContent = `${batch.id}${sourceFile} | ${imported}${excludedText} | ${t("productCheck.runStatus")}: ${runStatus}`;
+  const digestParts = [];
+  if (batch.source_sha256) digestParts.push(t("batch.sourceDigest", { digest: shortDigest(batch.source_sha256) }));
+  if (batch.content_sha256) digestParts.push(t("batch.contentDigest", { digest: shortDigest(batch.content_sha256) }));
+  if (batch.import_schema_version) digestParts.push(t("batch.schema", { version: batch.import_schema_version }));
+  els.batchDigestMeta.textContent = digestParts.join(" | ");
 
   els.runProductCheckButton.disabled = !state.selectedBatchId || state.productCheckRun?.status === "running";
   els.runProductCheckButton.textContent =
@@ -884,7 +1433,7 @@ function scheduleTaskProgressRender() {
 }
 
 function renderFilters() {
-  const models = [...new Set(state.items.map((item) => item.model))].sort();
+  const models = [...new Set((state.allItems.length ? state.allItems : state.items).map((item) => item.model))].sort();
   if (state.filters.model !== "all" && !models.includes(state.filters.model)) {
     state.filters.model = "all";
   }
@@ -893,6 +1442,8 @@ function renderFilters() {
     ["active", t("filters.active")],
     ["unreviewed", t("filters.unreviewed")],
     ["reviewed", t("filters.reviewed")],
+    ["needs_recheck", t("filters.status.needs_recheck")],
+    ["failed", t("filters.status.failed")],
     ["excluded", t("filters.excluded")],
   ];
   if (!statusFilterOptions.some(([value]) => value === state.filters.status)) {
@@ -906,7 +1457,62 @@ function renderFilters() {
   els.statusFilter.innerHTML = statusFilterOptions
     .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
     .join("");
+  renderAdvancedFilters();
   syncFilterControls();
+}
+
+function cacheFilterLabel(value) {
+  return t(`filters.cache.${value || "all"}`);
+}
+
+function filterChipEntries() {
+  const entries = [];
+  if (state.filters.scoreMin) entries.push({ key: "scoreMin", label: t("filters.chip.scoreMin", { value: state.filters.scoreMin }) });
+  if (state.filters.scoreMax) entries.push({ key: "scoreMax", label: t("filters.chip.scoreMax", { value: state.filters.scoreMax }) });
+  for (const tag of state.filters.tagIncludes) entries.push({ key: "tagIncludes", value: tag, label: t("filters.chip.tagIncludes", { value: tag }) });
+  for (const tag of state.filters.tagExcludes) entries.push({ key: "tagExcludes", value: tag, label: t("filters.chip.tagExcludes", { value: tag }) });
+  if (state.filters.reviewer) entries.push({ key: "reviewer", label: t("filters.chip.reviewer", { value: state.filters.reviewer }) });
+  if (state.filters.productCheckDeltaMin) {
+    entries.push({ key: "productCheckDeltaMin", label: t("filters.chip.productCheckDeltaMin", { value: state.filters.productCheckDeltaMin }) });
+  }
+  if (state.filters.cacheStatus !== "all") {
+    entries.push({ key: "cacheStatus", label: t("filters.chip.cacheStatus", { value: cacheFilterLabel(state.filters.cacheStatus) }) });
+  }
+  return entries;
+}
+
+function renderTagFilterButtons(target, selected, side) {
+  if (!target) return;
+  target.innerHTML = tagOptions
+    .map(
+      (tag) => `
+        <button class="filter-tag ${selected.includes(tag) ? "selected" : ""}" type="button" data-filter-tag="${escapeHtml(tag)}" data-filter-side="${side}">
+          ${escapeHtml(tag)}
+        </button>
+      `
+    )
+    .join("");
+}
+
+function renderAdvancedFilters() {
+  if (!els.advancedFilterButton) return;
+  els.advancedFilterButton.classList.toggle("active", hasAdvancedReviewFilters(state.filters));
+  els.filterDrawer.hidden = !state.filterDrawerOpen;
+  renderTagFilterButtons(els.tagIncludeFilters, state.filters.tagIncludes, "include");
+  renderTagFilterButtons(els.tagExcludeFilters, state.filters.tagExcludes, "exclude");
+  if (els.filterChips) {
+    const chips = filterChipEntries();
+    els.filterChips.innerHTML = chips
+      .map(
+        (chip) => `
+          <button class="filter-chip" type="button" data-filter-chip="${escapeHtml(chip.key)}" data-filter-chip-value="${escapeHtml(chip.value || "")}">
+            <span>${escapeHtml(chip.label)}</span>
+            <strong aria-hidden="true">x</strong>
+          </button>
+        `
+      )
+      .join("");
+  }
 }
 
 function selectedItemInVisibleList(visible = filteredItems()) {
@@ -926,6 +1532,20 @@ function resetItemListScroll() {
   }
 }
 
+function maxItemListScrollTop(total, viewportHeight = els.itemList.clientHeight || 480) {
+  return Math.max(0, total * ITEM_ROW_HEIGHT - viewportHeight);
+}
+
+function syncItemListScrollTop(total = filteredItems().length) {
+  const maxScrollTop = maxItemListScrollTop(total);
+  const nextScrollTop = Math.max(0, Math.min(maxScrollTop, Math.round(Number(state.itemListScrollTop) || 0)));
+  state.itemListScrollTop = nextScrollTop;
+  if (Math.abs(els.itemList.scrollTop - nextScrollTop) > 1) {
+    els.itemList.scrollTop = nextScrollTop;
+  }
+  return nextScrollTop;
+}
+
 function scheduleItemListRender() {
   if (state.itemListRenderFrame) return;
   state.itemListRenderFrame = requestAnimationFrame(() => {
@@ -939,6 +1559,7 @@ function renderItemList() {
   const visible = filteredItems();
   els.visibleCount.textContent = t("queue.visible", { count: visible.length });
   const viewportHeight = els.itemList.clientHeight || 480;
+  syncItemListScrollTop(visible.length);
 
   if (!visible.length) {
     els.itemList.innerHTML = `<div class="empty-list">${escapeHtml(t("queue.noMatching"))}</div>`;
@@ -987,6 +1608,11 @@ function renderItemList() {
 
   for (const button of els.itemList.querySelectorAll(".item-row")) {
     button.addEventListener("click", () => {
+      if (state.itemListRenderFrame) {
+        cancelAnimationFrame(state.itemListRenderFrame);
+        state.itemListRenderFrame = null;
+      }
+      state.itemListScrollTop = els.itemList.scrollTop;
       state.selectedItemId = button.dataset.id;
       scheduleUrlStateSync();
       render();
@@ -995,7 +1621,7 @@ function renderItemList() {
   updateScrollCurrentButton(visible);
 }
 
-function scrollCurrentItemIntoView(behavior = "smooth") {
+function scrollCurrentItemIntoView() {
   if (!state.selectedItemId) return;
   const visible = filteredItems();
   const index = visible.findIndex((item) => item.id === state.selectedItemId);
@@ -1010,7 +1636,7 @@ function scrollCurrentItemIntoView(behavior = "smooth") {
     rowHeight: ITEM_ROW_HEIGHT,
   });
   state.itemListScrollTop = top;
-  els.itemList.scrollTo({ top, behavior });
+  els.itemList.scrollTop = top;
   renderItemList();
 }
 
@@ -1397,6 +2023,11 @@ function renderReviewPane() {
 
       <form id="evaluationForm" class="evaluation-sidebar ${excluded ? "excluded" : ""}">
         <div class="evaluation-sticky">
+          <div class="timeline-stack">
+            ${renderReviewHistory()}
+            ${renderAuditTimeline()}
+          </div>
+
           <div class="evaluation-summary">
             <div>
               <span>${escapeHtml(t("review.evaluation"))}</span>
@@ -1558,9 +2189,12 @@ function renderReviewPane() {
 
   for (const input of formEl.querySelectorAll('input[type="range"]')) {
     input.addEventListener("input", () => {
+      const index = scoreFields.findIndex((field) => field.field === input.name);
+      if (index >= 0) setActiveScoreField(index);
       const output = formEl.querySelector(`[data-score-value="${input.name}"]`);
       output.textContent = input.value;
       document.querySelector("#overallScore").textContent = calculateOverall(readScoreForm(formEl));
+      markUnsaved();
     });
   }
 
@@ -1573,8 +2207,12 @@ function renderReviewPane() {
         currentTags.add(button.dataset.tag);
         button.classList.add("selected");
       }
+      markUnsaved();
     });
   }
+
+  formEl.elements.status?.addEventListener("change", markUnsaved);
+  formEl.elements.comment?.addEventListener("input", markUnsaved);
 
   formEl.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1607,6 +2245,57 @@ function renderReviewPane() {
       updateItemExclusion(item.id, { excluded: false }).catch((error) => alert(error.message));
     });
   }
+}
+
+function renderReviewHistory() {
+  const annotations = state.annotations || [];
+  const body = annotations.length
+    ? annotations
+        .map(
+          (annotation) => `
+            <li>
+              <div>
+                <strong>${escapeHtml(`${Number(annotation.overallScore || 0).toFixed(2)} · ${annotation.status}`)}</strong>
+                <span>${escapeHtml(new Date(annotation.createdAt).toLocaleString())}</span>
+              </div>
+              <p>${escapeHtml(t("review.reviewer"))}: ${escapeHtml(reviewerLabel({ id: annotation.reviewerId, name: annotation.reviewerName }))}</p>
+              <p>${escapeHtml((annotation.tags || []).join(", ") || "--")}</p>
+            </li>
+          `
+        )
+        .join("")
+    : `<li class="empty-list">${escapeHtml(t("review.noHistory"))}</li>`;
+  return `
+    <details class="timeline-panel">
+      <summary>${escapeHtml(t("review.history"))} (${annotations.length})</summary>
+      <ol>${body}</ol>
+    </details>
+  `;
+}
+
+function renderAuditTimeline() {
+  const events = state.auditEvents || [];
+  const body = events.length
+    ? events
+        .map(
+          (event) => `
+            <li>
+              <div>
+                <strong>${escapeHtml(event.eventType)}</strong>
+                <span>${escapeHtml(new Date(event.createdAt).toLocaleString())}</span>
+              </div>
+              <p>${escapeHtml(event.entityType || "")}${event.payload?.reviewer ? ` · ${escapeHtml(reviewerLabel(event.payload.reviewer))}` : ""}</p>
+            </li>
+          `
+        )
+        .join("")
+    : `<li class="empty-list">${escapeHtml(t("audit.noEvents"))}</li>`;
+  return `
+    <details class="timeline-panel audit-panel">
+      <summary>${escapeHtml(t("audit.timeline"))} (${events.length})</summary>
+      <ol>${body}</ol>
+    </details>
+  `;
 }
 
 function renderExclusionPanel(item) {
@@ -1655,8 +2344,9 @@ function renderExclusionPanel(item) {
 }
 
 function scoreRow(scoreField, value) {
+  const index = scoreFields.findIndex((field) => field.field === scoreField.field);
   return `
-    <div class="score-row">
+    <div class="score-row ${index === state.activeScoreFieldIndex ? "active" : ""}" data-score-index="${index}">
       <label for="${scoreField.field}">
         ${escapeHtml(scoreLabel(scoreField))}
         <small>${escapeHtml(t("score.weight", { weight: scoreField.weightLabel, help: scoreHelp(scoreField) }))}</small>
@@ -1877,6 +2567,7 @@ async function browserCacheImageRequest(item, kind) {
     method: "POST",
     headers: {
       "content-type": blob.type || imageResponse.headers.get("content-type") || "application/octet-stream",
+      ...reviewerRequestHeaders(),
     },
     body: blob,
   });
@@ -1916,6 +2607,96 @@ async function cacheImageFromBrowser(itemId, kind) {
     state.browserCachingImages.delete(key);
     render();
   }
+}
+
+async function loadReviewer() {
+  const body = await api("/api/reviewer/me");
+  state.reviewer = body.reviewer;
+}
+
+function reviewerDialogLocked() {
+  return state.reviewer?.source === "env" || state.reviewer?.locked;
+}
+
+function updateReviewerDialog() {
+  if (!els.reviewerDialog) return;
+  const reviewer = effectiveReviewerForDisplay();
+  els.reviewerIdInput.value = reviewer?.id || "";
+  els.reviewerNameInput.value = reviewer?.name || "";
+  els.reviewerDialogError.textContent = state.reviewerDialogError || "";
+  const locked = reviewerDialogLocked();
+  els.reviewerIdInput.disabled = locked;
+  els.reviewerNameInput.disabled = locked;
+  els.reviewerSaveButton.disabled = locked;
+  els.reviewerUseLocalButton.disabled = locked;
+}
+
+function openReviewerDialog({ required = false } = {}) {
+  if (!els.reviewerDialog || reviewerDialogLocked()) return;
+  state.reviewerDialogError = required ? "" : state.reviewerDialogError;
+  updateReviewerDialog();
+  if (!els.reviewerDialog.open) {
+    els.reviewerDialog.showModal();
+  }
+  window.setTimeout(() => els.reviewerIdInput.focus(), 0);
+}
+
+function validateReviewerForm() {
+  const id = els.reviewerIdInput.value.trim();
+  const name = els.reviewerNameInput.value.trim();
+  if (!id) {
+    state.reviewerDialogError = t("reviewer.errorRequired");
+    return null;
+  }
+  if (!REVIEWER_ID_PATTERN.test(id)) {
+    state.reviewerDialogError = t("reviewer.errorId");
+    return null;
+  }
+  state.reviewerDialogError = "";
+  return { id, name: name || id };
+}
+
+function saveReviewerFromDialog() {
+  const reviewer = validateReviewerForm();
+  if (!reviewer) {
+    updateReviewerDialog();
+    return false;
+  }
+  saveStoredReviewer(reviewer);
+  renderReviewerChip();
+  return true;
+}
+
+function ensureReviewerReady() {
+  if (reviewerDialogLocked() || state.browserReviewer) return;
+  openReviewerDialog({ required: true });
+}
+
+function openReviewerDialogFromChip() {
+  if (reviewerDialogLocked()) return;
+  openReviewerDialog();
+}
+
+function useLocalReviewer() {
+  state.reviewerDialogError = "";
+  saveStoredReviewer({ id: "local", name: "local" });
+  renderReviewerChip();
+  els.reviewerDialog?.close("local");
+}
+
+async function loadSelectedItemContext() {
+  if (!state.selectedItemId) {
+    state.annotations = [];
+    state.auditEvents = [];
+    return;
+  }
+  const itemId = encodeURIComponent(state.selectedItemId);
+  const [annotationsBody, auditBody] = await Promise.all([
+    api(`/api/items/${itemId}/annotations`),
+    api(`/api/audit-events?itemId=${itemId}&limit=20`),
+  ]);
+  state.annotations = annotationsBody.annotations || [];
+  state.auditEvents = auditBody.events || [];
 }
 
 async function loadBatches() {
@@ -2020,7 +2801,10 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     state.selectedBatchId = "";
     state.selectedItemId = "";
     state.items = [];
+    state.allItems = [];
     state.stats = null;
+    state.annotations = [];
+    state.auditEvents = [];
     state.productCheck = null;
     state.productCheckRun = null;
     resetItemListScroll();
@@ -2033,6 +2817,7 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   state.selectedBatchId = batchId;
   if (options.resetFilters) {
     state.filters = {
+      ...normalizeReviewFilters({}),
       model: "all",
       status: "all",
       search: "",
@@ -2041,13 +2826,16 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
     els.statusFilter.value = "all";
   }
   const previousSelectedItemId = state.selectedItemId;
+  const itemQuery = reviewItemQueryParamsFromFilters(state.filters).toString();
   const [itemsBody, statsBody, productCheckBody, productCheckRunBody] = await Promise.all([
-    api(`/api/batches/${batchId}/items`),
+    api(`/api/batches/${batchId}/items${itemQuery ? `?${itemQuery}` : ""}`),
     api(`/api/batches/${batchId}/stats`),
     api(`/api/batches/${batchId}/product-check`),
     api(`/api/batches/${batchId}/product-check/runs/latest`),
   ]);
   state.items = itemsBody.items;
+  state.allItems = itemsBody.allItems || itemsBody.items;
+  state.itemQuerySummary = itemsBody.summary || null;
   state.stats = statsBody.stats;
   state.productCheck = productCheckBody.productCheck;
   state.productCheckRun = productCheckRunBody.run;
@@ -2060,12 +2848,13 @@ async function loadBatch(batchId, keepSelectedItemId = "", options = {}) {
   if (state.selectedItemId !== previousSelectedItemId) {
     resetOverlayState();
   }
+  await loadSelectedItemContext();
   await loadBatches();
   startProductCheckPolling();
   render();
   scheduleUrlStateSync();
   if (options.scrollToSelected) {
-    scrollCurrentItemIntoView("auto");
+    scrollCurrentItemIntoView();
   }
   if (!options.skipAutoBrowserCache) {
     startAutoBrowserCache(batchId).catch((error) => console.error(error));
@@ -2077,6 +2866,7 @@ function render() {
   renderBatchSelect();
   renderResourceSelect();
   renderUploadImport();
+  renderReviewerChip();
   renderPreflight();
   renderMetrics();
   renderTaskProgress();
@@ -2156,6 +2946,7 @@ async function runResourcePreflight() {
   if (!state.selectedResourceFile) return;
   state.preflightPending = true;
   state.preflightError = "";
+  state.preflightDuplicateBatches = [];
   state.preflight = null;
   state.preflightSource = "resource";
   render();
@@ -2165,6 +2956,8 @@ async function runResourcePreflight() {
       body: JSON.stringify({ file: state.selectedResourceFile }),
     });
     state.preflight = body.preflight;
+    const digestBody = await api(`/api/batches/by-digest?digest=${encodeURIComponent(state.preflight.sourceDigest)}`);
+    state.preflightDuplicateBatches = digestBody.batches || [];
   } catch (error) {
     state.preflightError = error.message;
   } finally {
@@ -2179,12 +2972,14 @@ async function runUploadPreflight() {
   if (!file.name.toLowerCase().endsWith(".json")) {
     state.preflightSource = "upload";
     state.preflight = null;
+    state.preflightDuplicateBatches = [];
     state.preflightError = t("upload.invalidJson");
     render();
     return;
   }
   state.preflightPending = true;
   state.preflightError = "";
+  state.preflightDuplicateBatches = [];
   state.preflight = null;
   state.preflightSource = "upload";
   render();
@@ -2195,6 +2990,8 @@ async function runUploadPreflight() {
       body: JSON.stringify({ fileName: file.name, content: state.selectedUploadContent }),
     });
     state.preflight = body.preflight;
+    const digestBody = await api(`/api/batches/by-digest?digest=${encodeURIComponent(state.preflight.sourceDigest)}`);
+    state.preflightDuplicateBatches = digestBody.batches || [];
   } catch (error) {
     state.preflightError = error.message;
   } finally {
@@ -2237,6 +3034,7 @@ async function deleteSelectedBatch() {
     `${t("batch.deletePlan")}\n${t("batch.deletePlanSummary", {
       items: plan.items,
       evaluations: plan.evaluations,
+      annotations: plan.annotations || 0,
       bytes: formatFileSize(plan.totalBytes),
     })}\n\n${t("batch.deleteConfirm")}`,
     ""
@@ -2376,33 +3174,102 @@ els.runProductCheckButton.addEventListener("click", () => {
 
 els.modelFilter.addEventListener("change", () => {
   state.filters.model = els.modelFilter.value;
-  state.selectedItemId = filteredItems()[0]?.id || "";
-  resetItemListScroll();
-  scheduleUrlStateSync();
-  render();
+  applyFilterChange({ resetSelection: true });
 });
 
 els.statusFilter.addEventListener("change", () => {
   state.filters.status = els.statusFilter.value;
-  const visible = filteredItems();
-  if (!visible.some((item) => item.id === state.selectedItemId)) {
-    state.selectedItemId = visible[0]?.id || "";
-  }
-  resetItemListScroll();
-  scheduleUrlStateSync();
-  render();
+  applyFilterChange();
 });
 
 els.searchInput.addEventListener("input", () => {
   state.filters.search = els.searchInput.value;
-  state.selectedItemId = filteredItems()[0]?.id || "";
-  resetItemListScroll();
-  scheduleUrlStateSync();
-  render();
+  applyFilterChange({ resetSelection: true });
 });
+
+els.advancedFilterButton?.addEventListener("click", () => {
+  state.filterDrawerOpen = !state.filterDrawerOpen;
+  renderAdvancedFilters();
+});
+
+els.closeFilterDrawerButton?.addEventListener("click", () => {
+  state.filterDrawerOpen = false;
+  renderAdvancedFilters();
+});
+
+els.resetFiltersButton?.addEventListener("click", resetAdvancedFilters);
+
+for (const input of [els.scoreMinFilter, els.scoreMaxFilter, els.reviewerFilter, els.productCheckDeltaMinFilter]) {
+  input?.addEventListener("change", () => {
+    state.filters.scoreMin = els.scoreMinFilter.value;
+    state.filters.scoreMax = els.scoreMaxFilter.value;
+    state.filters.reviewer = els.reviewerFilter.value;
+    state.filters.productCheckDeltaMin = els.productCheckDeltaMinFilter.value;
+    applyFilterChange();
+  });
+}
+
+els.cacheStatusFilter?.addEventListener("change", () => {
+  state.filters.cacheStatus = els.cacheStatusFilter.value;
+  applyFilterChange();
+});
+
+els.filterChips?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-filter-chip]");
+  if (!button) return;
+  removeFilterChip(button.dataset.filterChip, button.dataset.filterChipValue || "");
+});
+
+for (const container of [els.tagIncludeFilters, els.tagExcludeFilters]) {
+  container?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-filter-tag]");
+    if (!button) return;
+    const side = button.dataset.filterSide;
+    const tag = button.dataset.filterTag;
+    const selected = !button.classList.contains("selected");
+    setTagFilter(side, tag, selected);
+    applyFilterChange();
+  });
+}
 
 els.nextUnreviewedButton.addEventListener("click", jumpToNextUnreviewed);
 els.closeDialogButton.addEventListener("click", () => els.imageDialog.close());
+els.shortcutHelpButton?.addEventListener("click", openShortcutDialog);
+els.closeShortcutDialogButton?.addEventListener("click", closeShortcutDialog);
+els.shortcutDialog?.addEventListener("close", () => {
+  state.shortcutHelpOpen = false;
+});
+document.addEventListener("keydown", handleGlobalKeydown);
+
+els.reviewerChip?.addEventListener("click", openReviewerDialogFromChip);
+els.reviewerChip?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  openReviewerDialogFromChip();
+});
+
+els.reviewerForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (saveReviewerFromDialog()) {
+    els.reviewerDialog.close("saved");
+  }
+});
+
+els.reviewerUseLocalButton?.addEventListener("click", useLocalReviewer);
+
+for (const input of [els.reviewerIdInput, els.reviewerNameInput]) {
+  input?.addEventListener("input", () => {
+    if (!state.reviewerDialogError) return;
+    state.reviewerDialogError = "";
+    updateReviewerDialog();
+  });
+}
+
+els.reviewerDialog?.addEventListener("close", () => {
+  if (reviewerDialogLocked() || state.browserReviewer) return;
+  saveStoredReviewer({ id: "local", name: "local" });
+  renderReviewerChip();
+});
 
 function showFatalError(error) {
   els.reviewPane.innerHTML = `
@@ -2415,6 +3282,7 @@ function showFatalError(error) {
   `;
 }
 
+await loadReviewer().catch(showFatalError);
 await loadResources().catch(showFatalError);
 await loadBatches();
 if (state.selectedResourceFile) {
@@ -2426,3 +3294,4 @@ if (state.selectedBatchId) {
   render();
   writeUrlState({ replace: true });
 }
+ensureReviewerReady();
